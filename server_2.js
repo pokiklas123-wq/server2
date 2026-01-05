@@ -99,15 +99,15 @@ function extractChapters(html) {
         if (elements.length > 0) {
             elements.each((i, element) => {
                 const $el = $(element);
-                const chapterLink = $el.find('a').attr('href');
-                const chapterTitle = $el.find('a').text().trim();
+                const chapterLink = $el.find('a').attr('href') || $el.attr('href');
+                const chapterTitle = $el.find('a').text().trim() || $el.text().trim();
                 
                 if (chapterLink && chapterTitle) {
                     const chapterNumMatch = chapterTitle.match(/(\d+(\.\d+)?)/);
-                    const chapterNum = chapterNumMatch ? parseFloat(chapterNumMatch[1]) : (i + 1) * 0.01; // رقم فريد تقريبي
+                    const chapterNum = chapterNumMatch ? parseFloat(chapterNumMatch[1]) : (i + 1) * 0.01;
                     
-                    // استخدام رابط الفصل كمعرف فريد
-                    const chapterId = crypto.createHash('md5').update(chapterLink).digest('hex').substring(0, 12);
+                    // استخدام رقم الفصل كمعرف فريد لتسهيل الترتيب
+                    const chapterId = chapterNum.toString().replace('.', '_');
                     
                     chapters.push({
                         chapterId: chapterId,
@@ -119,7 +119,6 @@ function extractChapters(html) {
                     });
                 }
             });
-            // نأخذ أول مجموعة ناجحة من الفصول
             return chapters.sort((a, b) => a.chapterNumber - b.chapterNumber);
         }
     }
@@ -156,35 +155,31 @@ async function processMangaJob(mangaId, job) {
     console.log(`\n🎯 بدء معالجة المانجا: ${job.title} (${mangaId})`);
     
     try {
-        // 1. جلب الفصول الحالية من الموقع
         const scrapedChapters = await getChaptersWithRetry(job.mangaUrl);
         
         if (scrapedChapters.length === 0) {
-            console.log('⚠️ لم يتم العثور على أي فصول. إنهاء المعالجة.');
+            console.log('⚠️ لم يتم العثور على أي فصول.');
             await writeToFirebase(`Jobs/${mangaId}`, { ...job, status: 'no_chapters_found', lastRun: Date.now() });
             return { success: false, message: 'لم يتم العثور على أي فصول' };
         }
         
-        // 2. قراءة الفصول الموجودة في Firebase
-        const existingChapters = await readFromFirebase(`ImgChapter/${mangaId}`) || {};
+        // قراءة الفصول الموجودة تحت ImgChapter/manga_id/chapters/
+        const existingData = await readFromFirebase(`ImgChapter/${mangaId}/chapters`) || {};
         
         let newChaptersCount = 0;
         
-        // 3. مقارنة وحفظ الفصول الجديدة
         for (const chapter of scrapedChapters) {
-            // نستخدم chapter.chapterId كمعرف فريد
-            if (!existingChapters[chapter.chapterId]) {
-                // فصل جديد
-                await writeToFirebase(`ImgChapter/${mangaId}/${chapter.chapterId}`, chapter);
+            if (!existingData[chapter.chapterId]) {
+                // حفظ الفصل الجديد
+                await writeToFirebase(`ImgChapter/${mangaId}/chapters/${chapter.chapterId}`, chapter);
                 console.log(`✨ فصل جديد: ${chapter.title}`);
                 newChaptersCount++;
                 
-                // 4. إخطار البوت 3
+                // إخطار البوت 3
                 await notifyServer3(mangaId, chapter.chapterId);
             }
         }
         
-        // 5. تحديث حالة المهمة
         const newStatus = newChaptersCount > 0 ? 'new_chapters_found' : 'no_new_chapters';
         await writeToFirebase(`Jobs/${mangaId}`, { 
             ...job, 
@@ -194,7 +189,7 @@ async function processMangaJob(mangaId, job) {
         });
         
         console.log(`✅ انتهت معالجة المانجا. فصول جديدة: ${newChaptersCount}`);
-        return { success: true, message: `تم العثور على ${newChaptersCount} فصل جديد/محدث.` };
+        return { success: true, message: `تم العثور على ${newChaptersCount} فصل جديد.` };
         
     } catch (error) {
         console.error(`❌ خطأ في معالجة المانجا ${mangaId}:`, error.message);
@@ -206,106 +201,45 @@ async function processMangaJob(mangaId, job) {
 // ==================== واجهات API ====================
 const app = express();
 
-// 🎯 API يستدعيه البوت 1 لإخطاره بمانجا جديدة/محدثة
 app.get('/process-manga/:mangaId', async (req, res) => {
     const { mangaId } = req.params;
-    console.log(`\n🚀 طلب معالجة المانجا من البوت 1: ${mangaId}`);
-    
     try {
         const job = await readFromFirebase(`Jobs/${mangaId}`);
+        if (!job) return res.status(404).json({ success: false, message: 'لم يتم العثور على المهمة' });
         
-        if (!job) {
-            return res.status(404).json({ success: false, message: 'لم يتم العثور على المهمة' });
-        }
-        
-        const result = await processMangaJob(mangaId, job);
-        res.json(result);
-        
+        // المعالجة في الخلفية
+        processMangaJob(mangaId, job);
+        res.json({ success: true, message: 'بدأت معالجة الفصول.' });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// 🔄 API للتحقق المستمر (يتم استدعاؤه بواسطة Render Cron Job)
-app.get('/start-continuous-check', async (req, res) => {
-    console.log('\n🔄 بدء التحقق المستمر من المهام المعلقة...');
-    
-    try {
-        const allJobs = await readFromFirebase('Jobs');
-        let processedCount = 0;
-        
-        if (allJobs) {
-            for (const [mangaId, job] of Object.entries(allJobs)) {
-                // معالجة المهام التي فشلت أو التي تم إخطارها من البوت 1
-                if (job && (job.status === 'waiting_chapters' || job.status === 'error' || job.status === 'no_new_chapters')) {
-                    await processMangaJob(mangaId, job);
-                    processedCount++;
-                    // تأخير بسيط لتجنب الضغط على Firebase
-                    await new Promise(resolve => setTimeout(resolve, 500));
+// محرك الفحص المستمر للمهام المعلقة (لضمان الاستمرارية)
+async function continuousJobCheck() {
+    while (true) {
+        try {
+            const allJobs = await readFromFirebase('Jobs');
+            if (allJobs) {
+                for (const [mangaId, job] of Object.entries(allJobs)) {
+                    if (job && (job.status === 'waiting_chapters' || job.status === 'error')) {
+                        await processMangaJob(mangaId, job);
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
                 }
             }
+        } catch (error) {
+            console.error('❌ خطأ في محرك الفحص المستمر:', error.message);
         }
-        
-        res.json({
-            success: true,
-            message: `تم فحص ${Object.keys(allJobs || {}).length} مهمة. تم معالجة ${processedCount} مهمة.`
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ في التحقق المستمر:', error.message);
-        res.status(500).json({ success: false, error: error.message });
+        await new Promise(resolve => setTimeout(resolve, 60000)); // فحص كل دقيقة
     }
-});
+}
 
-// 🏠 الصفحة الرئيسية المبسطة
 app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html dir="rtl" lang="ar">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>📖 البوت 2 - معالج الفصول</title>
-            <style>
-                body { font-family: 'Arial', sans-serif; margin: 20px; background: #f5f5f5; text-align: right; }
-                .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
-                ul { list-style: none; padding: 0; }
-                li { margin: 10px 0; padding: 10px; background: #f9f9f9; border-radius: 5px; border-right: 4px solid #4CAF50; }
-                a { color: #2196F3; text-decoration: none; font-weight: bold; }
-                a:hover { text-decoration: underline; }
-                .status { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.9em; }
-                .success { background: #d4edda; color: #155724; }
-                .error { background: #f8d7da; color: #721c24; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>📖 البوت 2 - معالج الفصول</h1>
-                
-                <h2>⚙️ حالة النظام:</h2>
-                <ul>
-                    <li>Firebase: <span class="status ${DATABASE_SECRETS ? 'success' : 'error'}">${DATABASE_SECRETS ? '✅ متصل' : '❌ غير متصل'}</span></li>
-                    <li>البوت 3 URL: <span class="status ${SERVER_3_URL ? 'success' : 'error'}">${SERVER_3_URL ? '✅ محدد' : '❌ مفقود'}</span></li>
-                    <li>المنفذ: <span class="status success">${PORT}</span></li>
-                </ul>
-                
-                <h2>🎯 الروابط الرئيسية:</h2>
-                <ul>
-                    <li><a href="/start-continuous-check">/start-continuous-check</a> - بدء التحقق المستمر (يجب أن يتم استدعاؤه بواسطة Render Cron Job)</li>
-                    <li>/process-manga/:mangaId - يستدعيه البوت 1</li>
-                </ul>
-                
-                <h2>📝 ملاحظة:</h2>
-                <p>هذا البوت يعمل بشكل آلي. يجب إعداد Render Cron Job لاستدعاء <code>/start-continuous-check</code> بشكل دوري (مثلاً كل 10 دقائق) لضمان معالجة جميع المهام المعلقة.</p>
-            </div>
-        </body>
-        </html>
-    `);
+    res.send(`<h1>📖 البوت 2 - معالج الفصول (معدل)</h1>`);
 });
 
-// تشغيل السيرفر
 app.listen(PORT, () => {
-    console.log(`\n✅ البوت 2 (معالج الفصول) يعمل على المنفذ ${PORT}`);
-    console.log(`🎯 جاهز لمعالجة الفصول...`);
+    console.log(`\n✅ البوت 2 يعمل على المنفذ ${PORT}`);
+    continuousJobCheck();
 });
