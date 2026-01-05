@@ -4,362 +4,242 @@ const cheerio = require('cheerio');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3001;
 
 const DATABASE_SECRETS = process.env.DATABASE_SECRETS;
 const DATABASE_URL = process.env.DATABASE;
-
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
-// 📱 نفس قائمة User-Agents من البوت 1
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-    'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-];
-
-// 🔄 قائمة بروكسيات
-const PROXIES = [
-    '',
-    'https://cors-anywhere.herokuapp.com/',
-    'https://api.allorigins.win/raw?url=',
-    'https://corsproxy.io/?',
-    'https://proxy.cors.sh/'
-];
-
-// دالة عشوائية
-function getRandomUserAgent() {
-    return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-}
-
-// دالة محاولة جميع البروكسيات
-async function fetchWithProxies(url) {
-    const errors = [];
-    
-    for (const proxy of PROXIES) {
-        try {
-            let targetUrl = url;
-            
-            if (proxy) {
-                if (proxy.includes('?')) {
-                    targetUrl = proxy + encodeURIComponent(url);
-                } else {
-                    targetUrl = proxy + url;
-                }
-            }
-            
-            console.log(`🔄 المحاولة مع: ${proxy || 'بدون بروكسي'}`);
-            
-            const response = await axios.get(targetUrl, {
-                headers: {
-                    'User-Agent': getRandomUserAgent(),
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Referer': 'https://azoramoon.com/'
-                },
-                timeout: 15000
-            });
-            
-            if (response.status === 200) {
-                console.log(`✅ نجح مع ${proxy || 'بدون بروكسي'}`);
-                return response.data;
-            } else {
-                console.log(`⚠️ حالة ${response.status} مع ${proxy || 'بدون بروكسي'}`);
-            }
-        } catch (error) {
-            errors.push(`${proxy || 'بدون بروكسي'}: ${error.message}`);
-            console.log(`❌ فشل مع ${proxy || 'بدون بروكسي'}: ${error.message}`);
-            
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-    }
-    
-    throw new Error(`فشل جميع المحاولات: ${errors.join(', ')}`);
-}
-
-// دالة قراءة Firebase
-async function readFromFirebase(path) {
-    const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    
-    try {
-        const response = await axios.get(url, { timeout: 10000 });
-        return response.data;
-    } catch (error) {
-        console.error(`❌ خطأ في قراءة ${path}:`, error.message);
-        return null;
-    }
-}
-
-// دالة كتابة Firebase
+// 🔧 الدوال الأساسية
 async function writeToFirebase(path, data) {
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    
     try {
-        const response = await axios.put(url, data, { timeout: 10000 });
-        console.log(`✅ كتب إلى ${path}`);
+        await axios.put(url, data, { timeout: 5000 });
+        return true;
+    } catch (error) {
+        console.error(`❌ كتابة: ${error.message}`);
+        return false;
+    }
+}
+
+async function readFromFirebase(path) {
+    const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
+    try {
+        const response = await axios.get(url, { timeout: 5000 });
         return response.data;
     } catch (error) {
-        console.error(`❌ خطأ في الكتابة إلى ${path}:`, error.message);
         return null;
     }
 }
 
-// دالة لجلب الفصول
-async function getChaptersWithRetry(mangaUrl) {
-    console.log(`\n🎯 محاولة جلب الفصول من: ${mangaUrl}`);
-    
+// 📖 استخراج الفصول
+async function extractChapters(mangaUrl) {
     try {
-        // المحاولة 1: مباشرة
-        try {
-            console.log('1️⃣ المحاولة المباشرة');
-            const response = await axios.get(mangaUrl, {
-                headers: {
-                    'User-Agent': getRandomUserAgent(),
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                },
-                timeout: 20000
-            });
+        console.log(`📚 جلب فصول: ${mangaUrl}`);
+        
+        const response = await axios.get(mangaUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 15000
+        });
+        
+        const $ = cheerio.load(response.data);
+        const chapters = [];
+        
+        $('.wp-manga-chapter').each((i, element) => {
+            const $el = $(element);
+            const chapterLink = $el.find('a').attr('href');
+            const chapterTitle = $el.find('a').text().trim();
             
-            const $ = cheerio.load(response.data);
-            const chapters = extractChapters($);
-            
-            if (chapters.length > 0) {
-                console.log(`✅ نجحت المحاولة المباشرة: ${chapters.length} فصل`);
-                return chapters;
+            if (chapterLink && chapterTitle) {
+                const chapterNumMatch = chapterTitle.match(/(\d+)/);
+                const chapterNum = chapterNumMatch ? parseInt(chapterNumMatch[1]) : i + 1;
+                
+                chapters.push({
+                    chapterId: `ch_${chapterNum.toString().padStart(4, '0')}`,
+                    chapterNumber: chapterNum,
+                    title: chapterTitle,
+                    url: chapterLink.startsWith('http') ? chapterLink : `https://azoramoon.com${chapterLink}`,
+                    status: 'pending_images',
+                    createdAt: Date.now()
+                });
             }
-        } catch (error) {
-            console.log('❌ فشلت المحاولة المباشرة:', error.message);
-        }
+        });
         
-        // المحاولة 2: مع بروكسيات
-        console.log('2️⃣ محاولة مع بروكسيات');
-        const html = await fetchWithProxies(mangaUrl);
-        const $ = cheerio.load(html);
-        const chapters = extractChapters($);
-        
-        if (chapters.length > 0) {
-            console.log(`✅ نجحت مع البروكسيات: ${chapters.length} فصل`);
-            return chapters;
-        }
-        
-        throw new Error('لم يتم العثور على فصول بعد جميع المحاولات');
+        console.log(`📊 وجدت ${chapters.length} فصل`);
+        return chapters.sort((a, b) => a.chapterNumber - b.chapterNumber);
         
     } catch (error) {
-        console.error('❌ خطأ في جلب الفصول:', error.message);
+        console.error(`❌ خطأ في الفصول: ${error.message}`);
         return [];
     }
 }
 
-// دالة استخراج الفصول
-function extractChapters($) {
-    const chapters = [];
+// 🔄 المعالجة التلقائية
+async function autoProcessJobs() {
+    console.log('\n🔍 البحث عن مهام...');
     
-    // محاولة عدة انتقاءات
-    const chapterSelectors = [
-        '.wp-manga-chapter',
-        '.chapter-item',
-        '.listing-chapters_wrap a',
-        'ul.main.version-chap li'
-    ];
-    
-    for (const selector of chapterSelectors) {
-        const elements = $(selector);
-        if (elements.length > 0) {
-            console.log(`✅ وجد ${elements.length} فصل بـ "${selector}"`);
-            
-            elements.each((i, element) => {
-                const $el = $(element);
-                const chapterLink = $el.find('a').attr('href');
-                const chapterTitle = $el.find('a').text().trim();
+    try {
+        // 1. البحث عن مهام جديدة
+        const jobs = await readFromFirebase('Jobs');
+        if (!jobs) return;
+        
+        for (const [mangaId, job] of Object.entries(jobs)) {
+            if (job.status === 'waiting') {
+                console.log(`🎯 معالجة: ${mangaId}`);
                 
-                if (chapterLink && chapterTitle) {
-                    const chapterNumMatch = chapterTitle.match(/(\d+)/);
-                    const chapterNum = chapterNumMatch ? parseInt(chapterNumMatch[1]) : i + 1;
+                // تحديث الحالة
+                await writeToFirebase(`Jobs/${mangaId}`, {
+                    ...job,
+                    status: 'processing',
+                    startedAt: Date.now()
+                });
+                
+                // استخراج الفصول
+                const chapters = await extractChapters(job.mangaUrl);
+                
+                if (chapters.length > 0) {
+                    // حفظ الفصول
+                    for (const chapter of chapters) {
+                        await writeToFirebase(`ImgChapter/${mangaId}/${chapter.chapterId}`, chapter);
+                    }
                     
-                    chapters.push({
-                        chapterId: `ch_${chapterNum.toString().padStart(4, '0')}`,
-                        chapterNumber: chapterNum,
-                        title: chapterTitle,
-                        url: chapterLink.startsWith('http') ? chapterLink : `https://azoramoon.com${chapterLink}`,
-                        status: 'pending_images',
-                        test: chapterLink.startsWith('http') ? chapterLink : `https://azoramoon.com${chapterLink}`,
-                        createdAt: Date.now()
+                    // تحديث المانجا
+                    await writeToFirebase(`HomeManga/${mangaId}`, {
+                        totalChapters: chapters.length,
+                        status: 'chapters_ready',
+                        chaptersUpdatedAt: Date.now()
                     });
+                    
+                    // إكمال المهمة
+                    await writeToFirebase(`Jobs/${mangaId}`, {
+                        ...job,
+                        status: 'completed',
+                        chaptersCount: chapters.length,
+                        completedAt: Date.now()
+                    });
+                    
+                    console.log(`✅ تم: ${chapters.length} فصل`);
+                    
+                } else {
+                    await writeToFirebase(`Jobs/${mangaId}`, {
+                        ...job,
+                        status: 'failed',
+                        error: 'لم يتم العثور على فصول',
+                        completedAt: Date.now()
+                    });
+                    console.log(`❌ فشل: لا توجد فصول`);
                 }
-            });
-            break;
+                
+                // تأخير بين المهام
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                break; // مهمة واحدة في كل دورة
+            }
         }
+        
+        // 2. التحقق من تحديثات الفصول
+        const allManga = await readFromFirebase('HomeManga') || {};
+        
+        for (const [mangaId, manga] of Object.entries(allManga)) {
+            if (manga.needsChapterCheck) {
+                console.log(`🔍 فحص تحديثات لـ ${mangaId}`);
+                
+                // قراءة الفصول الحالية
+                const currentChapters = await readFromFirebase(`ImgChapter/${mangaId}`) || {};
+                const currentCount = Object.keys(currentChapters).length;
+                
+                // جلب الفصول الجديدة
+                const job = await readFromFirebase(`Jobs/${mangaId}`);
+                if (job && job.mangaUrl) {
+                    const newChapters = await extractChapters(job.mangaUrl);
+                    
+                    if (newChapters.length > currentCount) {
+                        console.log(`🆕 فصول جديدة: ${newChapters.length - currentCount}`);
+                        
+                        // إضافة الفصول الجديدة فقط
+                        for (const chapter of newChapters) {
+                            if (!currentChapters[chapter.chapterId]) {
+                                await writeToFirebase(`ImgChapter/${mangaId}/${chapter.chapterId}`, chapter);
+                                console.log(`➕ فصل جديد: ${chapter.chapterId}`);
+                            }
+                        }
+                    }
+                }
+                
+                // إزالة العلامة
+                await writeToFirebase(`HomeManga/${mangaId}/needsChapterCheck`, null);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        
+    } catch (error) {
+        console.error('❌ خطأ في المعالجة:', error.message);
     }
-    
-    return chapters;
 }
 
-// API اختبار الموقع
-app.get('/test-site/:mangaId', async (req, res) => {
-    try {
-        const { mangaId } = req.params;
-        
-        // قراءة المهمة
-        const job = await readFromFirebase(`Jobs/${mangaId}`);
-        
-        if (!job) {
-            return res.json({
-                success: false,
-                error: 'لم يتم العثور على المهمة'
-            });
-        }
-        
-        console.log(`🔗 اختبار الموقع: ${job.mangaUrl}`);
-        
-        // اختبار مباشر
-        try {
-            const response = await axios.get(job.mangaUrl, {
-                headers: { 'User-Agent': getRandomUserAgent() },
-                timeout: 10000
-            });
-            
-            const $ = cheerio.load(response.data);
-            const title = $('.post-title h1').text().trim() || $('h1').first().text().trim();
-            
-            res.json({
-                success: true,
-                status: response.status,
-                title: title,
-                url: job.mangaUrl,
-                message: 'الموقع يستجيب'
-            });
-            
-        } catch (error) {
-            res.json({
-                success: false,
-                error: error.message,
-                status: error.response?.status,
-                url: job.mangaUrl,
-                message: 'الموقع لا يستجيب'
-            });
-        }
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+// ⏰ تشغيل تلقائي كل دقيقة
+let autoProcessInterval = null;
+
+function startAutoProcess(intervalSeconds = 60) {
+    if (autoProcessInterval) clearInterval(autoProcessInterval);
+    
+    autoProcessInterval = setInterval(autoProcessJobs, intervalSeconds * 1000);
+    console.log(`⏰ بدأ المعالجة كل ${intervalSeconds} ثانية`);
+    
+    // تشغيل أول مرة
+    setTimeout(autoProcessJobs, 3000);
+}
+
+function stopAutoProcess() {
+    if (autoProcessInterval) {
+        clearInterval(autoProcessInterval);
+        autoProcessInterval = null;
+        console.log('⏹️ توقف المعالجة');
     }
+}
+
+// 📊 APIs
+app.get('/start', (req, res) => {
+    const interval = parseInt(req.query.seconds) || 60;
+    startAutoProcess(interval);
+    res.json({ success: true, message: `بدأت المعالجة كل ${interval} ثانية` });
 });
 
-// API معالجة يدوية
-app.get('/manual-process/:mangaId', async (req, res) => {
-    try {
-        const { mangaId } = req.params;
-        
-        console.log(`\n🎯 معالجة يدوية: ${mangaId}`);
-        
-        // قراءة المهمة
-        const job = await readFromFirebase(`Jobs/${mangaId}`);
-        
-        if (!job) {
-            return res.json({
-                success: false,
-                error: 'لم يتم العثور على المهمة'
-            });
-        }
-        
-        console.log(`📖 المانجا: ${job.title || 'بدون عنوان'}`);
-        console.log(`🔗 الرابط: ${job.mangaUrl}`);
-        
-        // جلب الفصول
-        const chapters = await getChaptersWithRetry(job.mangaUrl);
-        
-        if (chapters.length === 0) {
-            return res.json({
-                success: false,
-                error: 'لم يتم العثور على أي فصل',
-                mangaId: mangaId,
-                url: job.mangaUrl,
-                suggestion: 'جرب فتح الرابط يدوياً في متصفح'
-            });
-        }
-        
-        console.log(`📊 تم العثور على ${chapters.length} فصل`);
-        
-        // حفظ في Firebase
-        for (const chapter of chapters) {
-            await writeToFirebase(`ImgChapter/${mangaId}/${chapter.chapterId}`, chapter);
-            console.log(`📝 حفظ: ${chapter.chapterId} - ${chapter.title}`);
-        }
-        
-        // تحديث حالة المهمة
-        await writeToFirebase(`Jobs/${mangaId}`, {
-            ...job,
-            status: 'completed',
-            chaptersCount: chapters.length,
-            completedAt: Date.now()
-        });
-        
-        // تحديث HomeManga
-        const mangaInfo = await readFromFirebase(`HomeManga/${mangaId}`) || {};
-        await writeToFirebase(`HomeManga/${mangaId}`, {
-            ...mangaInfo,
-            totalChapters: chapters.length,
-            status: 'chapters_ready',
-            chaptersUpdatedAt: Date.now()
-        });
-        
-        res.json({
-            success: true,
-            message: `تم حفظ ${chapters.length} فصل`,
-            mangaId: mangaId,
-            chaptersCount: chapters.length,
-            firstChapter: chapters[0],
-            lastChapter: chapters[chapters.length - 1]
-        });
-        
-    } catch (error) {
-        console.error('❌ خطأ:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message,
-            mangaId: req.params.mangaId
-        });
-    }
+app.get('/stop', (req, res) => {
+    stopAutoProcess();
+    res.json({ success: true, message: 'توقفت المعالجة' });
 });
 
-// صفحة رئيسية
+app.get('/run-now', async (req, res) => {
+    await autoProcessJobs();
+    res.json({ success: true, message: 'تمت المعالجة الآن' });
+});
+
+app.get('/status', async (req, res) => {
+    const jobs = await readFromFirebase('Jobs') || {};
+    const pending = Object.values(jobs).filter(j => j.status === 'waiting').length;
+    const processing = Object.values(jobs).filter(j => j.status === 'processing').length;
+    const completed = Object.values(jobs).filter(j => j.status === 'completed').length;
+    
+    res.json({
+        success: true,
+        autoRunning: !!autoProcessInterval,
+        jobs: { pending, processing, completed, total: Object.keys(jobs).length }
+    });
+});
+
+// 🏠 صفحة بسيطة
 app.get('/', (req, res) => {
     res.send(`
-        <h1>🔧 البوت 2 - النسخة المتطورة</h1>
-        
-        <h2>🎯 اختبارات مباشرة:</h2>
-        <ul>
-            <li><a href="/test-site/14584dfb5297">/test-site/14584dfb5297</a> - اختبار الموقع</li>
-            <li><a href="/manual-process/14584dfb5297">/manual-process/14584dfb5297</a> - معالجة يدوية</li>
-            <li><a href="/manual-process/35ee65f73457">/manual-process/35ee65f73457</a> - White Tiger Princess</li>
-            <li><a href="/manual-process/c5e1f11a5bd2">/manual-process/c5e1f11a5bd2</a> - Princess is Evil</li>
-        </ul>
-        
-        <h2>⚙️ المعلومات:</h2>
-        <p>عدد User-Agents: ${USER_AGENTS.length}</p>
-        <p>عدد البروكسيات: ${PROXIES.length}</p>
-        <p>الهدف: إنشاء قسم <code>ImgChapter</code> في Firebase</p>
-        
-        <h2>📝 التعليمات:</h2>
-        <ol>
-            <li>اختبر أولاً إذا كان الموقع يفتح</li>
-            <li>جرب معالجة مانجا مختلفة</li>
-            <li>تحقق من Firebase بعد المعالجة</li>
-        </ol>
+        <h1>📖 البوت 2 - معالج الفصول</h1>
+        <p><a href="/start">/start</a> - بدء التلقائي (60 ثانية)</p>
+        <p><a href="/stop">/stop</a> - إيقاف التلقائي</p>
+        <p><a href="/run-now">/run-now</a> - تشغيل الآن</p>
+        <p><a href="/status">/status</a> - حالة النظام</p>
     `);
 });
 
-// تشغيل السيرفر
+// 🚀 التشغيل
 app.listen(PORT, () => {
-    console.log(`\n✅ البوت 2 المعدل يعمل على المنفذ ${PORT}`);
-    console.log(`🔗 افتح: https://server-2.onrender.com`);
-    console.log(`🎯 جاهز لاختبار المواقع...`);
+    console.log(`✅ البوت 2 يعمل على ${PORT}`);
+    startAutoProcess(60);
 });
