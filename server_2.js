@@ -1,14 +1,13 @@
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const crypto = require('crypto');
 require('dotenv').config();
 
 // ==================== متغيرات البيئة ====================
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3001;
 const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
 const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
-const SERVER_3_URL = process.env.SERVER_3_URL; // متغير بيئة جديد للاتصال بالبوت 3
+const SERVER_3_URL = process.env.SERVER_3_URL || 'http://localhost:3002';
 
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
@@ -18,11 +17,15 @@ async function writeToFirebase(path, data) {
         console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
         return;
     }
-    const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
+    
+    // تنظيف المسار من الأحرف غير المسموح بها
+    const cleanPath = path.replace(/[.#$\[\]]/g, '_');
+    const url = `${FIXED_DB_URL}${cleanPath}.json?auth=${DATABASE_SECRETS}`;
+    
     try {
         await axios.put(url, data);
     } catch (error) {
-        console.error(`❌ فشل الكتابة إلى Firebase في ${path}:`, error.message);
+        console.error(`❌ فشل الكتابة إلى Firebase في ${cleanPath}:`, error.message);
         throw error;
     }
 }
@@ -32,27 +35,41 @@ async function readFromFirebase(path) {
         console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
         return null;
     }
-    const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
+    
+    const cleanPath = path.replace(/[.#$\[\]]/g, '_');
+    const url = `${FIXED_DB_URL}${cleanPath}.json?auth=${DATABASE_SECRETS}`;
+    
     try {
         const response = await axios.get(url);
         return response.data;
     } catch (error) {
         if (error.response && error.response.status === 404) {
-            return null; // لا يوجد بيانات
+            return null;
         }
-        console.error(`❌ فشل القراءة من Firebase في ${path}:`, error.message);
+        console.error(`❌ فشل القراءة من Firebase في ${cleanPath}:`, error.message);
         throw error;
     }
 }
 
-// ==================== إعدادات الجلب (مختصرة) ====================
+// ==================== دوال مساعدة للفصول ====================
+function generateSafeChapterId(chapterNumber) {
+    // تحويل رقم الفصل إلى معرّف آمن
+    return `ch_${chapterNumber.toString().replace(/[^\w]/g, '_')}`;
+}
+
+function cleanChapterNumber(chapterStr) {
+    const match = chapterStr.match(/(\d+(\.\d+)?)/);
+    return match ? parseFloat(match[1]) : 0;
+}
+
+// ==================== إعدادات الجلب ====================
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 ];
 
 const PROXIES = [
-    '', // بدون بروكسي أولاً
+    '',
     'https://cors-anywhere.herokuapp.com/',
     'https://api.allorigins.win/raw?url='
 ];
@@ -83,7 +100,6 @@ async function tryAllProxies(url) {
 }
 
 // ==================== منطق استخراج الفصول ====================
-
 function extractChapters(html) {
     const $ = cheerio.load(html);
     const chapters = [];
@@ -103,19 +119,17 @@ function extractChapters(html) {
                 const chapterTitle = $el.find('a').text().trim() || $el.text().trim();
                 
                 if (chapterLink && chapterTitle) {
-                    const chapterNumMatch = chapterTitle.match(/(\d+(\.\d+)?)/);
-                    const chapterNum = chapterNumMatch ? parseFloat(chapterNumMatch[1]) : (i + 1) * 0.01;
-                    
-                    // استخدام رقم الفصل كمعرف فريد لتسهيل الترتيب
-                    const chapterId = chapterNum.toString().replace('.', '_');
+                    const chapterNum = cleanChapterNumber(chapterTitle);
+                    const safeChapterId = generateSafeChapterId(chapterNum || i + 1);
                     
                     chapters.push({
-                        chapterId: chapterId,
-                        chapterNumber: chapterNum,
+                        chapterId: safeChapterId,
+                        chapterNumber: chapterNum || i + 1,
                         title: chapterTitle,
                         url: chapterLink.startsWith('http') ? chapterLink : `https://azoramoon.com${chapterLink}`,
                         status: 'pending_images',
-                        createdAt: Date.now()
+                        createdAt: Date.now(),
+                        safeChapterId: safeChapterId
                     });
                 }
             });
@@ -133,21 +147,33 @@ async function getChaptersWithRetry(url) {
 }
 
 // ==================== منطق التتابع والاتصال ====================
-
-async function notifyServer3(mangaId, chapterId) {
+async function notifyServer3(mangaId, chapterData) {
     if (!SERVER_3_URL) {
-        console.log('⚠️ لم يتم تحديد SERVER_3_URL. لن يتم إخطار البوت 3.');
+        console.log('⚠️ لم يتم تحديد SERVER_3_URL.');
         return;
     }
     
-    const url = `${SERVER_3_URL}/process-chapter/${mangaId}/${chapterId}`;
-    console.log(`\n🔔 إخطار البوت 3 لبدء معالجة الفصل: ${mangaId}/${chapterId}`);
+    const url = `${SERVER_3_URL}/process-chapter/${mangaId}/${chapterData.safeChapterId}`;
+    console.log(`\n🔔 إخطار البوت 3: ${mangaId}/${chapterData.safeChapterId}`);
     
     try {
         const response = await axios.get(url, { timeout: 10000 });
-        console.log(`✅ استجابة البوت 3: ${response.data.message || 'تم الإخطار بنجاح'}`);
+        console.log(`✅ استجابة البوت 3: ${response.data.message || 'تم الإخطار'}`);
     } catch (error) {
         console.error(`❌ فشل إخطار البوت 3: ${error.message}`);
+        
+        // المحاولة مرة أخرى إذا كان خطأ 404
+        if (error.response?.status === 404) {
+            console.log('🔄 محاولة ثانية بعد 5 ثواني...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            try {
+                const retryResponse = await axios.get(url, { timeout: 10000 });
+                console.log(`✅ نجحت المحاولة الثانية: ${retryResponse.data.message}`);
+            } catch (retryError) {
+                console.error(`❌ فشلت المحاولة الثانية: ${retryError.message}`);
+            }
+        }
     }
 }
 
@@ -159,11 +185,14 @@ async function processMangaJob(mangaId, job) {
         
         if (scrapedChapters.length === 0) {
             console.log('⚠️ لم يتم العثور على أي فصول.');
-            await writeToFirebase(`Jobs/${mangaId}`, { ...job, status: 'no_chapters_found', lastRun: Date.now() });
+            await writeToFirebase(`Jobs/${mangaId}`, { 
+                ...job, 
+                status: 'no_chapters_found', 
+                lastRun: Date.now() 
+            });
             return { success: false, message: 'لم يتم العثور على أي فصول' };
         }
         
-        // قراءة الفصول الموجودة تحت ImgChapter/manga_id/chapters/
         const existingData = await readFromFirebase(`ImgChapter/${mangaId}/chapters`) || {};
         
         let newChaptersCount = 0;
@@ -176,7 +205,7 @@ async function processMangaJob(mangaId, job) {
                 newChaptersCount++;
                 
                 // إخطار البوت 3
-                await notifyServer3(mangaId, chapter.chapterId);
+                await notifyServer3(mangaId, chapter);
             }
         }
         
@@ -193,7 +222,12 @@ async function processMangaJob(mangaId, job) {
         
     } catch (error) {
         console.error(`❌ خطأ في معالجة المانجا ${mangaId}:`, error.message);
-        await writeToFirebase(`Jobs/${mangaId}`, { ...job, status: 'error', error: error.message, lastRun: Date.now() });
+        await writeToFirebase(`Jobs/${mangaId}`, { 
+            ...job, 
+            status: 'error', 
+            error: error.message, 
+            lastRun: Date.now() 
+        });
         return { success: false, error: error.message };
     }
 }
@@ -205,17 +239,25 @@ app.get('/process-manga/:mangaId', async (req, res) => {
     const { mangaId } = req.params;
     try {
         const job = await readFromFirebase(`Jobs/${mangaId}`);
-        if (!job) return res.status(404).json({ success: false, message: 'لم يتم العثور على المهمة' });
+        if (!job) return res.status(404).json({ 
+            success: false, 
+            message: 'لم يتم العثور على المهمة' 
+        });
         
-        // المعالجة في الخلفية
         processMangaJob(mangaId, job);
-        res.json({ success: true, message: 'بدأت معالجة الفصول.' });
+        res.json({ 
+            success: true, 
+            message: 'بدأت معالجة الفصول.' 
+        });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
-// محرك الفحص المستمر للمهام المعلقة (لضمان الاستمرارية)
+// محرك الفحص المستمر للمهام المعلقة
 async function continuousJobCheck() {
     while (true) {
         try {
@@ -223,20 +265,21 @@ async function continuousJobCheck() {
             if (allJobs) {
                 for (const [mangaId, job] of Object.entries(allJobs)) {
                     if (job && (job.status === 'waiting_chapters' || job.status === 'error')) {
+                        console.log(`🔍 فحص المانجا: ${mangaId} (${job.status})`);
                         await processMangaJob(mangaId, job);
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        await new Promise(resolve => setTimeout(resolve, 5000));
                     }
                 }
             }
         } catch (error) {
             console.error('❌ خطأ في محرك الفحص المستمر:', error.message);
         }
-        await new Promise(resolve => setTimeout(resolve, 60000)); // فحص كل دقيقة
+        await new Promise(resolve => setTimeout(resolve, 60000));
     }
 }
 
 app.get('/', (req, res) => {
-    res.send(`<h1>📖 البوت 2 - معالج الفصول (معدل)</h1>`);
+    res.send(`<h1>📖 البوت 2 - معالج الفصول</h1>`);
 });
 
 app.listen(PORT, () => {
