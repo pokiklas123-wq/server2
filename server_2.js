@@ -3,214 +3,416 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 require('dotenv').config();
 
+// ==================== متغيرات البيئة ====================
 const PORT = process.env.PORT || 3001;
-const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
+const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt"; // يجب أن يكون هذا سراً
 const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
+// **التعديل 1: إضافة رابط البوت 3 للاتصال به**
+const SERVER_3_URL = "https://server-3-frfj.onrender.com"; 
 
+// ==================== إعدادات النظام ====================
 const SYSTEM_CONFIG = {
     MAX_CHAPTERS_PER_GROUP: 300,
     CHAPTER_GROUP_PREFIX: 'ImgChapter',
-    DELAY_BETWEEN_CHAPTERS: 1500, // تأخير بسيط بين الفصول
-    MAX_IMAGES: 100
+    DELAY_BETWEEN_CHAPTERS: 2000,
+    DELAY_BETWEEN_MANGA: 3000,
+    DELAY_BETWEEN_GROUPS: 2000,
+    MAX_FETCH_RETRIES: 3,
+    MAX_MANGA_PER_CYCLE: 20,
+    // **التعديل 2: إضافة بادئة مجموعة المانجا من البوت 1**
+    GROUP_PREFIX: 'HomeManga' 
 };
 
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
-// ==================== Firebase Helpers ====================
+// ==================== دوال Firebase ====================
 async function writeToFirebase(path, data) {
+    if (!FIXED_DB_URL || !DATABASE_SECRETS) {
+        console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
+        return;
+    }
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    try { await axios.put(url, data); } catch (e) { console.error(`Firebase Write Error: ${path}`); }
+    try {
+        await axios.put(url, data);
+    } catch (error) {
+        console.error(`❌ فشل الكتابة إلى Firebase في ${path}:`, error.message);
+        throw error;
+    }
 }
 
 async function readFromFirebase(path) {
+    if (!FIXED_DB_URL || !DATABASE_SECRETS) {
+        console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
+        return null;
+    }
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    try { const res = await axios.get(url); return res.data; } catch (e) { return null; }
+    try {
+        const response = await axios.get(url);
+        return response.data;
+    } catch (error) {
+        if (error.response && error.response.status === 404) {
+            return null;
+        }
+        console.error(`❌ فشل القراءة من Firebase في ${path}:`, error.message);
+        throw error;
+    }
 }
 
-// ==================== إدارة مجموعات الفصول ====================
-async function getChapterGroup() {
-    let stats = await readFromFirebase('System/chapter_stats');
-    if (!stats) stats = { currentGroup: 1, currentGroupCount: 0 };
-    
-    if (stats.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
-        stats.currentGroup++;
-        stats.currentGroupCount = 0;
+// ==================== نظام المجموعات للفصول ====================
+class ChapterGroupManager {
+    constructor() {
+        this.groupCounter = 1;
+        this.currentGroupCount = 0;
+        this.totalChaptersSaved = 0;
     }
     
-    // تحديث العداد محلياً (سنحدثه في القاعدة لاحقاً لتوفير الطلبات)
-    return { 
-        groupName: `${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_${stats.currentGroup}`,
-        stats: stats 
-    };
-}
+    async initialize() {
+        const stats = await readFromFirebase('System/chapter_stats') || {
+            currentGroup: 1,
+            currentGroupCount: 0,
+            totalChapters: 0
+        };
+        
+        this.groupCounter = stats.currentGroup || 1;
+        this.currentGroupCount = stats.currentGroupCount || 0;
+        this.totalChaptersSaved = stats.totalChapters || 0;
+    }
+    
+    async getChapterGroup() {
+        // **التعديل 3: تحديث منطق الحصول على المجموعة قبل الزيادة**
+        const stats = await readFromFirebase('System/chapter_stats') || {
+            currentGroup: 1,
+            currentGroupCount: 0,
+            totalChapters: 0
+        };
+        this.groupCounter = stats.currentGroup || 1;
+        this.currentGroupCount = stats.currentGroupCount || 0;
 
-async function updateChapterStats(stats) {
-    stats.currentGroupCount++;
-    stats.totalChapters = (stats.totalChapters || 0) + 1;
-    await writeToFirebase('System/chapter_stats', stats);
-}
-
-// ==================== أدوات الجلب (Headers القوية) ====================
-function getHeaders(referer = 'https://azoramoon.com/') {
-    return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': referer, // مهم جداً للصور
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
-    };
-}
-
-async function fetchWithRetry(url, referer) {
-    for (let i = 0; i < 3; i++) {
+        if (this.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
+            this.groupCounter++;
+            this.currentGroupCount = 0;
+            console.log(`🔄 الانتقال إلى مجموعة الفصول ${this.groupCounter}`);
+        }
+        
+        return `${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_${this.groupCounter}`;
+    }
+    
+    async saveChapter(mangaId, chapterData) {
+        const chapterGroup = await this.getChapterGroup();
+        const chapterId = chapterData.safeChapterId || `ch_${chapterData.chapterNumber.toString().replace(/[^\w]/g, '_')}`;
+        
+        // إنشاء الهيكل الكامل
+        const chapterPath = `${chapterGroup}/${mangaId}/chapters/${chapterId}`;
+        
+        const fullChapterData = {
+            ...chapterData,
+            mangaId: mangaId,
+            chapterGroup: chapterGroup,
+            savedAt: Date.now(),
+            status: 'pending_images'
+        };
+        
+        // حفظ الفصل
+        await writeToFirebase(chapterPath, fullChapterData);
+        
+        // **التعديل 4: تحديث الإحصائيات بعد الحفظ**
+        this.currentGroupCount++;
+        this.totalChaptersSaved++;
+        
+        await writeToFirebase('System/chapter_stats', {
+            currentGroup: this.groupCounter,
+            currentGroupCount: this.currentGroupCount,
+            totalChapters: this.totalChaptersSaved,
+            lastUpdate: Date.now()
+        });
+        
+        // إنشاء المجموعة الرئيسية إذا لم تكن موجودة
+        const groupBase = await readFromFirebase(chapterGroup);
+        if (!groupBase || !groupBase.created) { // تحقق إضافي
+            await writeToFirebase(chapterGroup, {
+                created: Date.now(),
+                type: 'chapter_group'
+            });
+        }
+        
+        console.log(`✅ تم حفظ الفصل في ${chapterGroup}/${mangaId}/chapters/${chapterId}`);
+        
+        // **التعديل 5: إرسال إشعار إلى البوت 3**
         try {
-            const res = await axios.get(url, { headers: getHeaders(referer), timeout: 20000 });
-            return res.data;
-        } catch (e) {
-            await new Promise(r => setTimeout(r, 2000));
+            const notifyUrl = `${SERVER_3_URL}/process-chapter/${mangaId}/${chapterId}?group=${chapterGroup}`;
+            await axios.get(notifyUrl);
+            console.log(`🔔 تم إرسال إشعار إلى البوت 3 لمعالجة الفصل: ${chapterId}`);
+        } catch (error) {
+            console.error(`❌ فشل إرسال إشعار إلى البوت 3: ${error.message}`);
+        }
+        
+        return {
+            saved: true,
+            chapterId: chapterId,
+            group: chapterGroup
+        };
+    }
+}
+
+const chapterGroupManager = new ChapterGroupManager();
+
+// ==================== دوال مساعدة ====================
+function generateSafeChapterId(chapterNumber) {
+    return `ch_${chapterNumber.toString().replace(/[^\w]/g, '_')}`;
+}
+
+function cleanChapterNumber(chapterStr) {
+    const match = chapterStr.match(/(\d+(\.\d+)?)/);
+    return match ? parseFloat(match[1]) : 0;
+}
+
+function getRandomHeaders() {
+    const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+    ];
+    // **التعديل 6: إضافة رأس Referer لتقليل الحظر**
+    return { 
+        'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
+        'Referer': 'https://azoramoon.com/' 
+    };
+}
+
+async function fetchWithRetry(url, maxRetries = SYSTEM_CONFIG.MAX_FETCH_RETRIES) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const response = await axios.get(url, {
+                headers: getRandomHeaders(),
+                timeout: 15000
+            });
+            return response.data;
+        } catch (error) {
+            if (i === maxRetries - 1) throw error;
+            await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
         }
     }
-    throw new Error('Failed to fetch after 3 retries');
 }
 
-// ==================== منطق استخراج الصور ====================
-function extractImages(html) {
-    const $ = cheerio.load(html);
-    const images = [];
-    
-    // محددات الصور الشائعة في قوالب المانجا
-    const selectors = ['.reading-content img', '.wp-manga-chapter-img', '#readerarea img', 'img[class*="wp-manga"]'];
-    
-    for (const sel of selectors) {
-        $(sel).each((i, el) => {
-            let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
-            if (src) {
-                src = src.trim().replace(/^\/\//, 'https://');
-                if (!images.includes(src)) images.push(src);
-            }
-        });
-        if (images.length > 0) break; // إذا وجدنا صور بمحدد، نتوقف
-    }
-    return images;
-}
-
-// ==================== منطق استخراج الفصول ====================
+// ==================== استخراج الفصول ====================
 function extractChapters(html) {
     const $ = cheerio.load(html);
     const chapters = [];
+    const chapterSelectors = [
+        '.wp-manga-chapter',
+        '.chapter-item',
+        '.listing-chapters_wrap a',
+        'ul.main.version-chap li',
+        '.chapter-list a',
+        '.chapter-li a'
+    ];
     
-    $('.wp-manga-chapter, .chapter-item, li.wp-manga-chapter').each((i, el) => {
-        const a = $(el).find('a');
-        const url = a.attr('href');
-        const title = a.text().trim();
-        
-        if (url) {
-            // استخراج الرقم لترتيب أفضل
-            const numMatch = title.match(/(\d+(\.\d+)?)/);
-            const num = numMatch ? parseFloat(numMatch[0]) : 0;
-            const id = `ch_${num.toString().replace('.', '_')}`;
+    for (const selector of chapterSelectors) {
+        const elements = $(selector);
+        if (elements.length > 0) {
+            console.log(`✅ وجد ${elements.length} فصل باستخدام: ${selector}`);
             
-            chapters.push({ id, num, title, url });
+            elements.each((i, element) => {
+                const $el = $(element);
+                const chapterLink = $el.find('a').attr('href') || $el.attr('href');
+                const chapterTitle = $el.find('a').text().trim() || $el.text().trim();
+                
+                if (chapterLink && chapterTitle) {
+                    const chapterNum = cleanChapterNumber(chapterTitle);
+                    
+                    chapters.push({
+                        title: chapterTitle,
+                        url: chapterLink,
+                        chapterNumber: chapterNum,
+                        safeChapterId: generateSafeChapterId(chapterNum),
+                        scrapedAt: Date.now()
+                    });
+                }
+            });
+            // **التعديل 7: يجب التوقف بعد العثور على الفصول لتجنب التكرار**
+            break; 
         }
-    });
+    }
     
-    // ترتيب تصاعدي (من 1 إلى الأحدث)
-    return chapters.sort((a, b) => a.num - b.num);
+    // **التعديل 8: عكس ترتيب الفصول لضمان معالجة الأقدم أولاً**
+    return chapters.reverse();
 }
 
-// ==================== المعالج الرئيسي ====================
-async function processFullManga(mangaId, mangaUrl) {
-    console.log(`⚙️ معالجة شاملة: ${mangaId}`);
+// ==================== منطق معالجة المانجا ====================
+async function processManga(mangaId, groupName) {
+    console.log(`\n🎯 بدء معالجة المانجا: ${mangaId} (${groupName})`);
+    
+    let mangaData = await readFromFirebase(`${groupName}/${mangaId}`);
+    
+    if (!mangaData) {
+        throw new Error(`المانجا ${mangaId} غير موجودة في ${groupName}`);
+    }
+    
+    const url = mangaData.url;
+    
+    // **التعديل 9: تحديث الحالة إلى قيد المعالجة**
+    await writeToFirebase(`${groupName}/${mangaId}`, {
+        ...mangaData,
+        status: 'processing',
+        processingStarted: Date.now()
+    });
     
     try {
-        // 1. جلب صفحة المانجا لاستخراج الفصول
-        const html = await fetchWithRetry(mangaUrl);
-        const chapters = extractChapters(html);
+        const html = await fetchWithRetry(url);
+        const scrapedChapters = extractChapters(html);
         
-        if (chapters.length === 0) {
-            console.log(`⚠️ لا توجد فصول: ${mangaId}`);
-            return;
+        if (scrapedChapters.length === 0) {
+            throw new Error('لم يتم العثور على أي فصول');
         }
-
-        console.log(`📚 وجد ${chapters.length} فصل.`);
-
-        // 2. التحقق من الفصول الموجودة مسبقاً لتجنب التكرار
-        // هذه الخطوة اختيارية لتقليل القراءة، لكن يفضل عملها
-        // سنقوم بالمعالجة المباشرة للفصول الجديدة فقط
         
-        // جلب معلومات المجموعة الحالية
-        let { groupName, stats } = await getChapterGroup();
+        let newChaptersCount = 0;
         
-        // 3. معالجة كل فصل
-        for (const chapter of chapters) {
-            // التحقق السريع (يمكن تحسينه بقراءة المانجا مرة واحدة)
-            const chapterPath = `${groupName}/${mangaId}/chapters/${chapter.id}`;
-            const exists = await readFromFirebase(chapterPath);
+        for (const chapter of scrapedChapters) {
+            const chapterId = chapter.safeChapterId;
             
-            if (!exists || !exists.images) {
-                console.log(`📥 جلب صور الفصل: ${chapter.title}`);
-                
-                try {
-                    // جلب صور الفصل فوراً
-                    const chapterHtml = await fetchWithRetry(chapter.url, mangaUrl);
-                    const images = extractImages(chapterHtml);
-                    
-                    if (images.length > 0) {
-                        const chapterData = {
-                            ...chapter,
-                            images: images,
-                            totalImages: images.length,
-                            savedAt: Date.now()
-                        };
-                        
-                        // حفظ الفصل مع صوره مباشرة
-                        await writeToFirebase(chapterPath, chapterData);
-                        
-                        // تحديث العدادات
-                        await updateChapterStats(stats);
-                        
-                        // إذا امتلأت المجموعة، ننتقل للتالية
-                        if (stats.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
-                            const newGroupInfo = await getChapterGroup();
-                            groupName = newGroupInfo.groupName;
-                            stats = newGroupInfo.stats;
-                        }
-                    } else {
-                        console.log(`⚠️ فصل فارغ: ${chapter.title}`);
-                    }
-                    
-                    // تأخير لتجنب الحظر
-                    await new Promise(r => setTimeout(r, SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS));
-                    
-                } catch (err) {
-                    console.error(`❌ خطأ في الفصل ${chapter.id}: ${err.message}`);
-                }
+            // التحقق مما إذا كان الفصل موجودًا بالفعل
+            const chapterGroup = await chapterGroupManager.getChapterGroup();
+            const chapterPath = `${chapterGroup}/${mangaId}/chapters/${chapterId}`;
+            const existingChapter = await readFromFirebase(chapterPath);
+            
+            if (!existingChapter) {
+                // حفظ الفصل وإرسال إشعار إلى البوت 3
+                await chapterGroupManager.saveChapter(mangaId, chapter);
+                newChaptersCount++;
+                await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS));
+            } else {
+                console.log(`⏭️  الفصل ${chapter.title} موجود بالفعل. تم التخطي.`);
             }
         }
-        console.log(`✅ تمت معالجة المانجا: ${mangaId}`);
+        
+        // تحديث حالة المانجا في البوت 1
+        await writeToFirebase(`${groupName}/${mangaId}`, {
+            ...mangaData,
+            status: 'chapters_added',
+            lastChecked: Date.now(),
+            newChapters: newChaptersCount,
+            totalChapters: (mangaData.totalChapters || 0) + newChaptersCount
+        });
+        
+        console.log(`✅ اكتملت معالجة المانجا ${mangaId}. تم إضافة ${newChaptersCount} فصل جديد.`);
+        
+        return {
+            success: true,
+            newChapters: newChaptersCount
+        };
         
     } catch (error) {
-        console.error(`❌ خطأ كبير في المانجا ${mangaId}: ${error.message}`);
+        console.error(`❌ خطأ في معالجة المانجا ${mangaId}:`, error.message);
+        
+        // تحديث حالة المانجا إلى خطأ
+        await writeToFirebase(`${groupName}/${mangaId}`, {
+            ...mangaData,
+            status: 'error',
+            error: error.message,
+            lastChecked: Date.now()
+        });
+        
+        return {
+            success: false,
+            error: error.message
+        };
     }
 }
 
-// ==================== الخادم ====================
+// **التعديل 10: إزالة محرك الفحص المستمر غير الضروري**
+/*
+async function continuousMangaCheck() {
+    // ... (تمت إزالة الكود)
+}
+*/
+
+// ==================== واجهات API ====================
 const app = express();
 
-app.get('/process-full/:mangaId', async (req, res) => {
+// **التعديل 11: تعديل واجهة API لاستقبال الطلب من البوت 1**
+app.get('/process-manga/:mangaId', async (req, res) => {
     const { mangaId } = req.params;
-    const { url } = req.query;
+    const { group } = req.query;
     
-    if (!url) return res.status(400).send('URL required');
-    
-    // نرد فوراً لكي لا ينتظر البوت الأول
-    res.json({ success: true, message: 'Processing started in background' });
-    
-    // العمل في الخلفية
-    processFullManga(mangaId, url);
+    try {
+        if (!group) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'يرجى تحديد اسم المجموعة (?group=HomeManga_X)' 
+            });
+        }
+        
+        // **التعديل 12: تشغيل العملية في الخلفية لتجنب انتهاء مهلة الطلب**
+        processManga(mangaId, group)
+            .then(result => console.log(`[خلفية] معالجة المانجا ${mangaId} اكتملت:`, result))
+            .catch(error => console.error(`[خلفية] خطأ في معالجة المانجا ${mangaId}:`, error.message));
+        
+        res.json({ 
+            success: true, 
+            message: 'بدأت معالجة الفصول في الخلفية',
+            mangaId: mangaId,
+            group: group
+        });
+        
+    } catch (error) {
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
 });
 
-app.get('/', (req, res) => res.send('Bot 2 (Super Worker) is Ready.'));
+// **التعديل 13: إزالة واجهة API /force-create-imgchapter غير الضرورية**
+// app.get('/force-create-imgchapter', async (req, res) => { ... });
+
+// **التعديل 14: إزالة واجهة API /test-chapter/:mangaId غير الضرورية**
+// app.get('/test-chapter/:mangaId', async (req, res) => { ... });
+
+app.get('/stats', async (req, res) => {
+    try {
+        const chapterStats = await readFromFirebase('System/chapter_stats') || {};
+        
+        // **التعديل 15: تبسيط حساب الإحصائيات (يمكن إعادة تفعيل الحساب المعقد إذا لزم الأمر)**
+        // تم إزالة الحساب المعقد الذي يقرأ جميع المجموعات لتجنب انتهاء المهلة
+        
+        res.json({
+            success: true,
+            system: SYSTEM_CONFIG,
+            chapterStats: chapterStats,
+            totals: {
+                totalChaptersSaved: chapterStats.totalChapters || 0,
+                chapterGroups: chapterStats.currentGroup || 1
+            },
+            groups: Array.from({length: chapterStats.currentGroup || 1}, (_, i) => 
+                `${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_${i + 1}`
+            )
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/', (req, res) => {
+    res.send(`
+        <h1>📖 البوت 2 - معالج الفصول</h1>
+        <p><strong>الحالة:</strong> 🟢 يعمل وينتظر أوامر من البوت 1</p>
+        <p><strong>المجموعات:</strong> ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى N</p>
+        <p><strong>الفصول/مجموعة:</strong> ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}</p>
+        
+        <h3>الروابط:</h3>
+        <p><a href="/stats">/stats</a> - إحصائيات الفصول</p>
+    `);
+});
 
 app.listen(PORT, () => {
-    console.log(`✅ البوت 2 (الشامل) يعمل على المنفذ ${PORT}`);
+    console.log(`\n✅ البوت 2 يعمل على المنفذ ${PORT}`);
+    console.log(`📊 نظام الفصول:`);
+    console.log(`   • المجموعات: ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى N`);
+    console.log(`   • الفصول/مجموعة: ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}`);
+    
+    setTimeout(async () => {
+        await chapterGroupManager.initialize();
+        // **التعديل 16: إزالة بدء الفحص المستمر**
+        // continuousMangaCheck();
+        console.log('⏸️ تم تعطيل الفحص المستمر. البوت ينتظر الآن إشارات من البوت 1.');
+    }, 5000);
 });
