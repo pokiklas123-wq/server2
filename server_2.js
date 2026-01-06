@@ -318,7 +318,100 @@ async function processManga(mangaId, groupName) {
     }
 }
 
-// **التعديل 10: إزالة محرك الفحص المستمر غير الضروري**
+// ==================== محرك الفحص المستمر ====================
+async function continuousMangaCheck() {
+    console.log('\n🔍 بدء الفحص المستمر للمانجا...');
+    
+    while (true) {
+        try {
+            let processedCount = 0;
+            let newChaptersTotal = 0;
+            
+            console.log('\n📊 بدء دورة فحص جديدة للمانجا...');
+            
+            // قراءة إحصائيات المانجا من البوت 1
+            const mangaStats = await readFromFirebase('System/stats') || {};
+            const maxGroup = mangaStats.currentGroup || 1;
+            
+            console.log(`📁 عدد مجموعات المانجا: ${maxGroup}`);
+            
+            for (let groupNum = 1; groupNum <= maxGroup; groupNum++) {
+                const groupName = `${SYSTEM_CONFIG.GROUP_PREFIX}_${groupNum}`;
+                
+                try {
+                    console.log(`\n📁 فحص مجموعة المانجا: ${groupName}`);
+                    
+                    const groupData = await readFromFirebase(groupName);
+                    
+                    if (!groupData || typeof groupData !== 'object') {
+                        console.log(`   ⏭️  المجموعة فارغة أو غير موجودة`);
+                        continue;
+                    }
+                    
+                    for (const mangaId in groupData) {
+                        const manga = groupData[mangaId];
+                        
+                        // معالجة المانجا التي لم يتم معالجتها بعد أو التي بها خطأ
+                        if (manga.status === 'pending_chapters' || 
+                            manga.status === 'error' || 
+                            !manga.status) {
+                            
+                            console.log(`\n🎯 معالجة [${groupName}]: ${manga.title || mangaId}`);
+                            console.log(`   📊 الحالة: ${manga.status || 'unknown'}`);
+                            
+                            try {
+                                const result = await processManga(mangaId, groupName);
+                                
+                                if (result.success) {
+                                    processedCount++;
+                                    newChaptersTotal += result.newChapters || 0;
+                                    
+                                    console.log(`   ✅ تمت المعالجة: ${result.newChapters || 0} فصل جديد`);
+                                } else {
+                                    console.log(`   ⚠️  فشل: ${result.message || result.error}`);
+                                }
+                                
+                            } catch (error) {
+                                console.error(`   ❌ خطأ في المعالجة: ${error.message}`);
+                            }
+                            
+                            await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
+                            
+                            if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) {
+                                console.log(`\n⏸️  وصلت للحد الأقصى (${SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE})`);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_GROUPS));
+                    
+                    if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) break;
+                    
+                } catch (groupError) {
+                    console.error(`   ❌ خطأ في المجموعة ${groupName}:`, groupError.message);
+                }
+            }
+            
+            console.log(`\n📊 دورة الفحص اكتملت:`);
+            console.log(`   • مانجا معالجة: ${processedCount}`);
+            console.log(`   • فصول جديدة: ${newChaptersTotal}`);
+            
+            const waitTime = processedCount > 0 ? 120000 : 300000; // الانتظار دقيقتين إذا تمت المعالجة، 5 دقائق إذا لم تتم
+            console.log(`⏳ الانتظار ${waitTime / 1000} ثانية للدورة التالية...\n`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            
+        } catch (error) {
+            console.error('❌ خطأ في محرك الفحص المستمر:', error.message);
+            await new Promise(resolve => setTimeout(resolve, 60000));
+        }
+    }
+}
+/*
+async function continuousMangaCheck() {
+    // ... (تمت إزالة الكود)
+}
+*/
 /*
 async function continuousMangaCheck() {
     // ... (تمت إزالة الكود)
@@ -394,7 +487,7 @@ app.get('/stats', async (req, res) => {
 app.get('/', (req, res) => {
     res.send(`
         <h1>📖 البوت 2 - معالج الفصول</h1>
-        <p><strong>الحالة:</strong> 🟢 يعمل وينتظر أوامر من البوت 1</p>
+        <p><strong>الحالة:</strong> 🟢 يعمل (مستمع للبوت 1 + فحص مستمر)</p>
         <p><strong>المجموعات:</strong> ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى N</p>
         <p><strong>الفصول/مجموعة:</strong> ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}</p>
         
@@ -411,8 +504,8 @@ app.listen(PORT, () => {
     
     setTimeout(async () => {
         await chapterGroupManager.initialize();
-        // **التعديل 16: إزالة بدء الفحص المستمر**
-        // continuousMangaCheck();
-        console.log('⏸️ تم تعطيل الفحص المستمر. البوت ينتظر الآن إشارات من البوت 1.');
+        // **التعديل 16: إعادة تفعيل بدء الفحص المستمر كخيار احتياطي**
+        continuousMangaCheck();
+        console.log('✅ تم تفعيل الفحص المستمر كخيار احتياطي.');
     }, 5000);
 });
