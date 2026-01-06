@@ -3,656 +3,214 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 require('dotenv').config();
 
-// ==================== متغيرات البيئة ====================
 const PORT = process.env.PORT || 3001;
 const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
 const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
-const SERVER_3_URL = "https://server-3-frfj.onrender.com/";
 
-// ==================== إعدادات النظام ====================
 const SYSTEM_CONFIG = {
     MAX_CHAPTERS_PER_GROUP: 300,
     CHAPTER_GROUP_PREFIX: 'ImgChapter',
-    DELAY_BETWEEN_CHAPTERS: 2000,
-    DELAY_BETWEEN_MANGA: 3000,
-    DELAY_BETWEEN_GROUPS: 2000,
-    MAX_FETCH_RETRIES: 3,
-    MAX_MANGA_PER_CYCLE: 20
+    DELAY_BETWEEN_CHAPTERS: 1500, // تأخير بسيط بين الفصول
+    MAX_IMAGES: 100
 };
 
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
-// ==================== دوال Firebase ====================
+// ==================== Firebase Helpers ====================
 async function writeToFirebase(path, data) {
-    if (!FIXED_DB_URL || !DATABASE_SECRETS) {
-        console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
-        return;
-    }
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    try {
-        await axios.put(url, data);
-    } catch (error) {
-        console.error(`❌ فشل الكتابة إلى Firebase في ${path}:`, error.message);
-        throw error;
-    }
+    try { await axios.put(url, data); } catch (e) { console.error(`Firebase Write Error: ${path}`); }
 }
 
 async function readFromFirebase(path) {
-    if (!FIXED_DB_URL || !DATABASE_SECRETS) {
-        console.error('❌ خطأ: متغيرات Firebase غير موجودة.');
-        return null;
-    }
     const url = `${FIXED_DB_URL}${path}.json?auth=${DATABASE_SECRETS}`;
-    try {
-        const response = await axios.get(url);
-        return response.data;
-    } catch (error) {
-        if (error.response && error.response.status === 404) {
-            return null;
-        }
-        console.error(`❌ فشل القراءة من Firebase في ${path}:`, error.message);
-        throw error;
-    }
+    try { const res = await axios.get(url); return res.data; } catch (e) { return null; }
 }
 
-// ==================== نظام المجموعات للفصول ====================
-class ChapterGroupManager {
-    constructor() {
-        this.groupCounter = 1;
-        this.currentGroupCount = 0;
-        this.totalChaptersSaved = 0;
+// ==================== إدارة مجموعات الفصول ====================
+async function getChapterGroup() {
+    let stats = await readFromFirebase('System/chapter_stats');
+    if (!stats) stats = { currentGroup: 1, currentGroupCount: 0 };
+    
+    if (stats.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
+        stats.currentGroup++;
+        stats.currentGroupCount = 0;
     }
     
-    async initialize() {
-        const stats = await readFromFirebase('System/chapter_stats') || {
-            currentGroup: 1,
-            currentGroupCount: 0,
-            totalChapters: 0
-        };
-        
-        this.groupCounter = stats.currentGroup || 1;
-        this.currentGroupCount = stats.currentGroupCount || 0;
-        this.totalChaptersSaved = stats.totalChapters || 0;
-    }
-    
-    async getChapterGroup() {
-        if (this.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
-            this.groupCounter++;
-            this.currentGroupCount = 0;
-            console.log(`🔄 الانتقال إلى مجموعة الفصول ${this.groupCounter}`);
-        }
-        
-        const chapterGroup = `${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_${this.groupCounter}`;
-        
-        this.currentGroupCount++;
-        this.totalChaptersSaved++;
-        
-        await writeToFirebase('System/chapter_stats', {
-            currentGroup: this.groupCounter,
-            currentGroupCount: this.currentGroupCount,
-            totalChapters: this.totalChaptersSaved,
-            lastUpdate: Date.now()
-        });
-        
-        return chapterGroup;
-    }
-    
-    async saveChapter(mangaId, chapterData) {
-        const chapterGroup = await this.getChapterGroup();
-        const chapterId = chapterData.safeChapterId || `ch_${chapterData.chapterNumber.toString().replace(/[^\w]/g, '_')}`;
-        
-        // إنشاء الهيكل الكامل
-        const chapterPath = `${chapterGroup}/${mangaId}/chapters/${chapterId}`;
-        
-        const fullChapterData = {
-            ...chapterData,
-            mangaId: mangaId,
-            chapterGroup: chapterGroup,
-            savedAt: Date.now(),
-            status: 'pending_images'
-        };
-        
-        // حفظ الفصل
-        await writeToFirebase(chapterPath, fullChapterData);
-        
-        // إنشاء المجموعة الرئيسية إذا لم تكن موجودة
-        const groupBase = await readFromFirebase(chapterGroup);
-        if (!groupBase) {
-            await writeToFirebase(chapterGroup, {
-                created: Date.now(),
-                type: 'chapter_group'
-            });
-        }
-        
-        console.log(`✅ تم حفظ الفصل في ${chapterGroup}/${mangaId}/chapters/${chapterId}`);
-        
-        return {
-            saved: true,
-            chapterId: chapterId,
-            group: chapterGroup
-        };
-    }
+    // تحديث العداد محلياً (سنحدثه في القاعدة لاحقاً لتوفير الطلبات)
+    return { 
+        groupName: `${SYSTEM_CONFIG.CHAPTER_GROUP_PREFIX}_${stats.currentGroup}`,
+        stats: stats 
+    };
 }
 
-const chapterGroupManager = new ChapterGroupManager();
-
-// ==================== دوال مساعدة ====================
-function generateSafeChapterId(chapterNumber) {
-    return `ch_${chapterNumber.toString().replace(/[^\w]/g, '_')}`;
+async function updateChapterStats(stats) {
+    stats.currentGroupCount++;
+    stats.totalChapters = (stats.totalChapters || 0) + 1;
+    await writeToFirebase('System/chapter_stats', stats);
 }
 
-function cleanChapterNumber(chapterStr) {
-    const match = chapterStr.match(/(\d+(\.\d+)?)/);
-    return match ? parseFloat(match[1]) : 0;
+// ==================== أدوات الجلب (Headers القوية) ====================
+function getHeaders(referer = 'https://azoramoon.com/') {
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': referer, // مهم جداً للصور
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+    };
 }
 
-function getRandomHeaders() {
-    const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
-    ];
-    return { 'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)] };
-}
-
-async function fetchWithRetry(url, maxRetries = SYSTEM_CONFIG.MAX_FETCH_RETRIES) {
-    for (let i = 0; i < maxRetries; i++) {
+async function fetchWithRetry(url, referer) {
+    for (let i = 0; i < 3; i++) {
         try {
-            const response = await axios.get(url, {
-                headers: getRandomHeaders(),
-                timeout: 15000
-            });
-            return response.data;
-        } catch (error) {
-            if (i === maxRetries - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
+            const res = await axios.get(url, { headers: getHeaders(referer), timeout: 20000 });
+            return res.data;
+        } catch (e) {
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
+    throw new Error('Failed to fetch after 3 retries');
 }
 
-// ==================== استخراج الفصول ====================
+// ==================== منطق استخراج الصور ====================
+function extractImages(html) {
+    const $ = cheerio.load(html);
+    const images = [];
+    
+    // محددات الصور الشائعة في قوالب المانجا
+    const selectors = ['.reading-content img', '.wp-manga-chapter-img', '#readerarea img', 'img[class*="wp-manga"]'];
+    
+    for (const sel of selectors) {
+        $(sel).each((i, el) => {
+            let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
+            if (src) {
+                src = src.trim().replace(/^\/\//, 'https://');
+                if (!images.includes(src)) images.push(src);
+            }
+        });
+        if (images.length > 0) break; // إذا وجدنا صور بمحدد، نتوقف
+    }
+    return images;
+}
+
+// ==================== منطق استخراج الفصول ====================
 function extractChapters(html) {
     const $ = cheerio.load(html);
     const chapters = [];
-    const chapterSelectors = [
-        '.wp-manga-chapter',
-        '.chapter-item',
-        '.listing-chapters_wrap a',
-        'ul.main.version-chap li',
-        '.chapter-list a',
-        '.chapter-li a'
-    ];
     
-    for (const selector of chapterSelectors) {
-        const elements = $(selector);
-        if (elements.length > 0) {
-            console.log(`✅ وجد ${elements.length} فصل باستخدام: ${selector}`);
+    $('.wp-manga-chapter, .chapter-item, li.wp-manga-chapter').each((i, el) => {
+        const a = $(el).find('a');
+        const url = a.attr('href');
+        const title = a.text().trim();
+        
+        if (url) {
+            // استخراج الرقم لترتيب أفضل
+            const numMatch = title.match(/(\d+(\.\d+)?)/);
+            const num = numMatch ? parseFloat(numMatch[0]) : 0;
+            const id = `ch_${num.toString().replace('.', '_')}`;
             
-            elements.each((i, element) => {
-                const $el = $(element);
-                const chapterLink = $el.find('a').attr('href') || $el.attr('href');
-                const chapterTitle = $el.find('a').text().trim() || $el.text().trim();
-                
-                if (chapterLink && chapterTitle) {
-                    const chapterNum = cleanChapterNumber(chapterTitle);
-                    const safeChapterId = generateSafeChapterId(chapterNum || i + 1);
-                    
-                    chapters.push({
-                        chapterId: safeChapterId,
-                        chapterNumber: chapterNum || i + 1,
-                        title: chapterTitle,
-                        url: chapterLink.startsWith('http') ? chapterLink : `https://azoramoon.com${chapterLink}`,
-                        status: 'pending_images',
-                        createdAt: Date.now(),
-                        safeChapterId: safeChapterId
-                    });
-                }
-            });
-            return chapters.sort((a, b) => a.chapterNumber - b.chapterNumber);
+            chapters.push({ id, num, title, url });
         }
-    }
+    });
     
-    console.log('⚠️ لم يتم العثور على فصول');
-    return [];
+    // ترتيب تصاعدي (من 1 إلى الأحدث)
+    return chapters.sort((a, b) => a.num - b.num);
 }
 
-async function getChaptersFromUrl(url) {
-    console.log(`🔗 جلب الفصول من: ${url}`);
-    try {
-        const html = await fetchWithRetry(url);
-        return extractChapters(html);
-    } catch (error) {
-        console.error(`❌ فشل جلب الفصول: ${error.message}`);
-        return [];
-    }
-}
-
-// ==================== إخطار البوت 3 ====================
-async function notifyServer3(mangaId, chapterData, chapterGroup) {
-    if (!SERVER_3_URL) {
-        console.log('⚠️ لم يتم تحديد SERVER_3_URL.');
-        return;
-    }
-    
-    const url = `${SERVER_3_URL}/process-chapter/${mangaId}/${chapterData.chapterId}?group=${chapterGroup}`;
-    console.log(`🔔 إخطار البوت 3: ${mangaId}/${chapterData.chapterId} (${chapterGroup})`);
+// ==================== المعالج الرئيسي ====================
+async function processFullManga(mangaId, mangaUrl) {
+    console.log(`⚙️ معالجة شاملة: ${mangaId}`);
     
     try {
-        const response = await axios.get(url, { timeout: 10000 });
-        console.log(`✅ استجابة البوت 3: ${response.data.message || 'تم الإخطار'}`);
-    } catch (error) {
-        console.error(`❌ فشل إخطار البوت 3: ${error.message}`);
-    }
-}
+        // 1. جلب صفحة المانجا لاستخراج الفصول
+        const html = await fetchWithRetry(mangaUrl);
+        const chapters = extractChapters(html);
+        
+        if (chapters.length === 0) {
+            console.log(`⚠️ لا توجد فصول: ${mangaId}`);
+            return;
+        }
 
-// ==================== معالجة المانجا ====================
-async function processManga(mangaId, groupName) {
-    console.log(`\n🎯 بدء معالجة المانجا: ${mangaId} (${groupName})`);
-    
-    try {
-        const mangaData = await readFromFirebase(`${groupName}/${mangaId}`);
-        
-        if (!mangaData) {
-            console.error(`❌ المانجا ${mangaId} غير موجودة في ${groupName}`);
-            return { success: false, message: 'المانجا غير موجودة' };
-        }
-        
-        console.log(`📖 المانجا: ${mangaData.title || mangaId}`);
-        console.log(`🔗 الرابط: ${mangaData.url}`);
-        
-        const scrapedChapters = await getChaptersFromUrl(mangaData.url);
-        
-        if (scrapedChapters.length === 0) {
-            console.log('⚠️ لم يتم العثور على أي فصول.');
-            
-            await writeToFirebase(`${groupName}/${mangaId}`, {
-                ...mangaData,
-                status: 'no_chapters_found',
-                lastChecked: Date.now(),
-                chaptersCount: 0
-            });
-            
-            return { success: false, message: 'لم يتم العثور على أي فصول' };
-        }
-        
-        console.log(`📊 تم العثور على ${scrapedChapters.length} فصل`);
-        
-        let newChaptersCount = 0;
-        
-        for (const chapter of scrapedChapters) {
-            let chapterExists = false;
-            
-            // التحقق من وجود الفصل في أي مجموعة
-            const stats = await readFromFirebase('System/chapter_stats') || {};
-            const maxChapterGroup = stats.currentGroup || 1;
-            
-            for (let g = 1; g <= maxChapterGroup; g++) {
-                const chapterGroup = `ImgChapter_${g}`;
-                const existingChapter = await readFromFirebase(`${chapterGroup}/${mangaId}/chapters/${chapter.chapterId}`);
-                
-                if (existingChapter) {
-                    chapterExists = true;
-                    break;
-                }
-            }
-            
-            if (!chapterExists) {
-                const result = await chapterGroupManager.saveChapter(mangaId, chapter);
-                
-                if (result.saved) {
-                    newChaptersCount++;
-                    
-                    console.log(`✨ فصل جديد: ${chapter.title}`);
-                    console.log(`📁 المجموعة: ${result.group}`);
-                    
-                    await notifyServer3(mangaId, chapter, result.group);
-                    
-                    await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS));
-                }
-            }
-        }
-        
-        const status = newChaptersCount > 0 ? 'chapters_added' : 'up_to_date';
-        
-        await writeToFirebase(`${groupName}/${mangaId}`, {
-            ...mangaData,
-            status: status,
-            chaptersCount: scrapedChapters.length,
-            newChaptersCount: newChaptersCount,
-            lastChecked: Date.now(),
-            lastUpdated: Date.now()
-        });
-        
-        console.log(`✅ انتهت معالجة المانجا`);
-        console.log(`📊 فصول جديدة: ${newChaptersCount}/${scrapedChapters.length}`);
-        
-        return { 
-            success: true, 
-            message: `تم العثور على ${newChaptersCount} فصل جديد`,
-            totalChapters: scrapedChapters.length,
-            newChapters: newChaptersCount
-        };
-        
-    } catch (error) {
-        console.error(`❌ خطأ في معالجة المانجا ${mangaId}:`, error.message);
-        
-        try {
-            const mangaData = await readFromFirebase(`${groupName}/${mangaId}`);
-            if (mangaData) {
-                await writeToFirebase(`${groupName}/${mangaId}`, {
-                    ...mangaData,
-                    status: 'error',
-                    error: error.message,
-                    lastChecked: Date.now()
-                });
-            }
-        } catch (e) {
-            console.error('❌ فشل تحديث حالة الخطأ:', e.message);
-        }
-        
-        return { success: false, error: error.message };
-    }
-}
+        console.log(`📚 وجد ${chapters.length} فصل.`);
 
-// ==================== محرك الفحص المستمر ====================
-async function continuousMangaCheck() {
-    console.log('\n🔍 بدء الفحص المستمر للمانجا...');
-    
-    while (true) {
-        try {
-            let processedCount = 0;
-            let newChaptersTotal = 0;
+        // 2. التحقق من الفصول الموجودة مسبقاً لتجنب التكرار
+        // هذه الخطوة اختيارية لتقليل القراءة، لكن يفضل عملها
+        // سنقوم بالمعالجة المباشرة للفصول الجديدة فقط
+        
+        // جلب معلومات المجموعة الحالية
+        let { groupName, stats } = await getChapterGroup();
+        
+        // 3. معالجة كل فصل
+        for (const chapter of chapters) {
+            // التحقق السريع (يمكن تحسينه بقراءة المانجا مرة واحدة)
+            const chapterPath = `${groupName}/${mangaId}/chapters/${chapter.id}`;
+            const exists = await readFromFirebase(chapterPath);
             
-            console.log('\n📊 بدء دورة فحص جديدة...');
-            
-            // فحص جميع مجموعات HomeManga
-            for (let groupNum = 1; groupNum <= 52; groupNum++) {
-                const groupName = `HomeManga_${groupNum}`;
+            if (!exists || !exists.images) {
+                console.log(`📥 جلب صور الفصل: ${chapter.title}`);
                 
                 try {
-                    console.log(`\n📁 فحص المجموعة: ${groupName}`);
+                    // جلب صور الفصل فوراً
+                    const chapterHtml = await fetchWithRetry(chapter.url, mangaUrl);
+                    const images = extractImages(chapterHtml);
                     
-                    const groupData = await readFromFirebase(groupName);
-                    
-                    if (!groupData || typeof groupData !== 'object') {
-                        console.log(`   ⏭️  المجموعة فارغة`);
-                        continue;
-                    }
-                    
-                    const mangaIds = Object.keys(groupData);
-                    console.log(`   📊 عدد المانجا: ${mangaIds.length}`);
-                    
-                    if (mangaIds.length === 0) continue;
-                    
-                    for (const mangaId of mangaIds) {
-                        const manga = groupData[mangaId];
+                    if (images.length > 0) {
+                        const chapterData = {
+                            ...chapter,
+                            images: images,
+                            totalImages: images.length,
+                            savedAt: Date.now()
+                        };
                         
-                        if (!manga) continue;
+                        // حفظ الفصل مع صوره مباشرة
+                        await writeToFirebase(chapterPath, chapterData);
                         
-                        // معالجة المانجا التي تحتاج معالجة
-                        if (manga.status === 'pending_chapters' || 
-                            manga.status === 'chapters_added' || 
-                            manga.status === 'error' || 
-                            !manga.status) {
-                            
-                            console.log(`\n🎯 معالجة [${groupName}]: ${manga.title || mangaId}`);
-                            console.log(`   📊 الحالة: ${manga.status || 'unknown'}`);
-                            
-                            try {
-                                const result = await processManga(mangaId, groupName);
-                                
-                                if (result.success) {
-                                    processedCount++;
-                                    newChaptersTotal += result.newChapters || 0;
-                                    
-                                    console.log(`   ✅ تمت المعالجة: ${result.newChapters || 0} فصل جديد`);
-                                } else {
-                                    console.log(`   ⚠️  فشل: ${result.message || result.error}`);
-                                }
-                                
-                            } catch (error) {
-                                console.error(`   ❌ خطأ في المعالجة: ${error.message}`);
-                            }
-                            
-                            await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
-                            
-                            if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) {
-                                console.log(`\n⏸️  وصلت للحد الأقصى (${SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE})`);
-                                break;
-                            }
+                        // تحديث العدادات
+                        await updateChapterStats(stats);
+                        
+                        // إذا امتلأت المجموعة، ننتقل للتالية
+                        if (stats.currentGroupCount >= SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP) {
+                            const newGroupInfo = await getChapterGroup();
+                            groupName = newGroupInfo.groupName;
+                            stats = newGroupInfo.stats;
                         }
+                    } else {
+                        console.log(`⚠️ فصل فارغ: ${chapter.title}`);
                     }
                     
-                    await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_GROUPS));
+                    // تأخير لتجنب الحظر
+                    await new Promise(r => setTimeout(r, SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS));
                     
-                    if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) break;
-                    
-                } catch (groupError) {
-                    console.error(`   ❌ خطأ في المجموعة ${groupName}:`, groupError.message);
+                } catch (err) {
+                    console.error(`❌ خطأ في الفصل ${chapter.id}: ${err.message}`);
                 }
             }
-            
-            console.log(`\n📊 دورة الفحص اكتملت:`);
-            console.log(`   • مانجا معالجة: ${processedCount}`);
-            console.log(`   • فصول جديدة: ${newChaptersTotal}`);
-            
-            const waitTime = processedCount > 0 ? 120000 : 300000;
-            console.log(`⏳ الانتظار ${waitTime / 1000} ثانية للدورة التالية...\n`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            
-        } catch (error) {
-            console.error('❌ خطأ في محرك الفحص المستمر:', error.message);
-            await new Promise(resolve => setTimeout(resolve, 60000));
         }
+        console.log(`✅ تمت معالجة المانجا: ${mangaId}`);
+        
+    } catch (error) {
+        console.error(`❌ خطأ كبير في المانجا ${mangaId}: ${error.message}`);
     }
 }
 
-// ==================== واجهات API ====================
+// ==================== الخادم ====================
 const app = express();
 
-app.get('/process-manga/:mangaId', async (req, res) => {
+app.get('/process-full/:mangaId', async (req, res) => {
     const { mangaId } = req.params;
-    const { group } = req.query;
+    const { url } = req.query;
     
-    try {
-        if (!group) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'يرجى تحديد اسم المجموعة (?group=HomeManga_X)' 
-            });
-        }
-        
-        processManga(mangaId, group);
-        
-        res.json({ 
-            success: true, 
-            message: 'بدأت معالجة الفصول',
-            mangaId: mangaId,
-            group: group
-        });
-        
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-app.get('/force-create-imgchapter', async (req, res) => {
-    try {
-        // إنشاء ImgChapter_1 يدوياً
-        await writeToFirebase('ImgChapter_1', {
-            created: Date.now(),
-            type: 'chapter_group',
-            description: 'مجموعة الفصول رقم 1'
-        });
-        
-        // إنشاء إحصائيات الفصول
-        await writeToFirebase('System/chapter_stats', {
-            currentGroup: 1,
-            currentGroupCount: 0,
-            totalChapters: 0,
-            created: Date.now()
-        });
-        
-        res.json({ 
-            success: true, 
-            message: 'تم إنشاء ImgChapter_1 يدوياً'
-        });
-        
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
-});
-
-app.get('/test-chapter/:mangaId', async (req, res) => {
-    const { mangaId } = req.params;
-    const { group } = req.query || 'HomeManga_1';
+    if (!url) return res.status(400).send('URL required');
     
-    try {
-        console.log(`🧪 اختبار معالجة الفصول للمانجا: ${mangaId}`);
-        
-        const mangaData = await readFromFirebase(`${group}/${mangaId}`);
-        
-        if (!mangaData) {
-            return res.json({ 
-                success: false, 
-                message: `المانجا ${mangaId} غير موجودة في ${group}` 
-            });
-        }
-        
-        console.log(`📖 المانجا: ${mangaData.title}`);
-        console.log(`🔗 الرابط: ${mangaData.url}`);
-        
-        const scrapedChapters = await getChaptersFromUrl(mangaData.url);
-        
-        console.log(`📊 تم العثور على ${scrapedChapters.length} فصل`);
-        
-        if (scrapedChapters.length > 0) {
-            // حفظ أول فصل فقط للاختبار
-            const firstChapter = scrapedChapters[0];
-            const result = await chapterGroupManager.saveChapter(mangaId, firstChapter);
-            
-            res.json({
-                success: true,
-                message: `تم حفظ فصل اختباري`,
-                chapter: firstChapter,
-                result: result,
-                totalChapters: scrapedChapters.length,
-                firstChapter: scrapedChapters[0]
-            });
-        } else {
-            res.json({
-                success: false,
-                message: 'لم يتم العثور على فصول',
-                manga: mangaData
-            });
-        }
-        
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
-    }
+    // نرد فوراً لكي لا ينتظر البوت الأول
+    res.json({ success: true, message: 'Processing started in background' });
+    
+    // العمل في الخلفية
+    processFullManga(mangaId, url);
 });
 
-app.get('/stats', async (req, res) => {
-    try {
-        const chapterStats = await readFromFirebase('System/chapter_stats') || {};
-        
-        let totalChapters = 0;
-        let mangaWithChapters = 0;
-        
-        // حساب الفصول في جميع المجموعات
-        for (let g = 1; g <= (chapterStats.currentGroup || 1); g++) {
-            const groupName = `ImgChapter_${g}`;
-            const groupData = await readFromFirebase(groupName);
-            
-            if (groupData) {
-                for (const mangaId in groupData) {
-                    if (groupData[mangaId] && groupData[mangaId].chapters) {
-                        mangaWithChapters++;
-                        totalChapters += Object.keys(groupData[mangaId].chapters).length;
-                    }
-                }
-            }
-        }
-        
-        res.json({
-            success: true,
-            system: SYSTEM_CONFIG,
-            chapterStats: chapterStats,
-            totals: {
-                totalChapters: totalChapters,
-                mangaWithChapters: mangaWithChapters,
-                chapterGroups: chapterStats.currentGroup || 1
-            },
-            groups: Array.from({length: chapterStats.currentGroup || 1}, (_, i) => 
-                `ImgChapter_${i + 1}`
-            )
-        });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/', (req, res) => {
-    res.send(`
-        <h1>📖 البوت 2 - معالج الفصول</h1>
-        <p><strong>الحالة:</strong> 🟢 يعمل ويبحث في جميع المجموعات</p>
-        <p><strong>المجموعات:</strong> HomeManga_1 إلى HomeManga_52</p>
-        <p><strong>الفصول/مجموعة:</strong> ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}</p>
-        
-        <h3>الروابط:</h3>
-        <p><a href="/stats">/stats</a> - إحصائيات الفصول</p>
-        <p><a href="/force-create-imgchapter">/force-create-imgchapter</a> - إنشاء ImgChapter_1 يدوياً</p>
-        <p><a href="/test-chapter/[manga_id]?group=HomeManga_1">/test-chapter/[manga_id]</a> - اختبار فصل</p>
-        
-        <h3>هيكل التخزين:</h3>
-        <pre>ImgChapter_1/
-└── [manga_id]/
-    └── chapters/
-        ├── ch_1
-        ├── ch_2
-        └── ...
-
-ImgChapter_2/
-└── [manga_id]/
-    └── chapters/
-        ├── ch_301
-        └── ...</pre>
-    `);
-});
+app.get('/', (req, res) => res.send('Bot 2 (Super Worker) is Ready.'));
 
 app.listen(PORT, () => {
-    console.log(`\n✅ البوت 2 يعمل على المنفذ ${PORT}`);
-    console.log(`📊 نظام الفصول:`);
-    console.log(`   • المجموعات: HomeManga_1 إلى HomeManga_52`);
-    console.log(`   • الفصول/مجموعة: ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}`);
-    
-    // إنشاء ImgChapter_1 تلقائياً إذا لم يكن موجوداً
-    setTimeout(async () => {
-        const imgChapterExists = await readFromFirebase('ImgChapter_1');
-        if (!imgChapterExists) {
-            console.log('🔄 إنشاء ImgChapter_1 تلقائياً...');
-            await writeToFirebase('ImgChapter_1', {
-                created: Date.now(),
-                type: 'chapter_group'
-            });
-            await writeToFirebase('System/chapter_stats', {
-                currentGroup: 1,
-                currentGroupCount: 0,
-                totalChapters: 0,
-                created: Date.now()
-            });
-            console.log('✅ تم إنشاء ImgChapter_1');
-        }
-        
-        // بدء الفحص
-        continuousMangaCheck();
-    }, 5000);
+    console.log(`✅ البوت 2 (الشامل) يعمل على المنفذ ${PORT}`);
 });
