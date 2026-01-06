@@ -7,7 +7,7 @@ require('dotenv').config();
 const PORT = process.env.PORT || 3001;
 const DATABASE_SECRETS = "KXPNxnGZDA1BGnzs4kZIA45o6Vr9P5nJ3Z01X4bt";
 const DATABASE_URL = "https://hackerdz-b1bdf.firebaseio.com";
-const SERVER_3_URL = process.env.SERVER_3_URL;
+const SERVER_3_URL = "https://server-3-frfj.onrender.com/";
 
 // ==================== إعدادات النظام ====================
 const SYSTEM_CONFIG = {
