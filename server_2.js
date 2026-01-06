@@ -23,6 +23,82 @@ const SYSTEM_CONFIG = {
     GROUP_PREFIX: 'HomeManga' 
 };
 
+// ==================== رؤوس HTTP محسنة ====================
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+];
+
+const REFERERS = [
+    'https://www.google.com/',
+    'https://www.bing.com/',
+    'https://azoramoon.com/',
+    ''
+];
+
+const PROXIES = [
+    '',
+    'https://cors-anywhere.herokuapp.com/',
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?',
+    'https://proxy.cors.sh/'
+];
+
+// ==================== دوال الرؤوس ====================
+function getRandomHeaders() {
+    const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    const referer = REFERERS[Math.floor(Math.random() * REFERERS.length)];
+    
+    return {
+        'User-Agent': userAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': referer,
+        'DNT': '1'
+    };
+}
+
+async function tryAllProxies(url) {
+    const errors = [];
+    
+    for (const proxy of PROXIES) {
+        try {
+            let targetUrl = url;
+            if (proxy) {
+                targetUrl = proxy + encodeURIComponent(url);
+            }
+            
+            console.log(`🔄 محاولة [${proxy ? 'بروكسي' : 'مباشر'}]`);
+            
+            const response = await axios.get(targetUrl, {
+                headers: getRandomHeaders(),
+                timeout: 20000,
+                maxRedirects: 3,
+                validateStatus: (status) => status >= 200 && status < 500
+            });
+            
+            if (response.status === 200) {
+                console.log(`✅ نجح [${proxy ? 'بروكسي' : 'مباشر'}]`);
+                return response.data;
+            } else {
+                errors.push(`${proxy ? 'بروكسي' : 'مباشر'}: ${response.status}`);
+            }
+            
+        } catch (error) {
+            errors.push(`${proxy ? 'بروكسي' : 'مباشر'}: ${error.message}`);
+            console.log(`❌ فشل [${proxy ? 'بروكسي' : 'مباشر'}]: ${error.message}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    throw new Error(`فشلت جميع محاولات الجلب:\n${errors.join('\n')}`);
+}
+
 const FIXED_DB_URL = DATABASE_URL && !DATABASE_URL.endsWith('/') ? DATABASE_URL + '/' : DATABASE_URL;
 
 // ==================== دوال Firebase ====================
@@ -166,35 +242,6 @@ function cleanChapterNumber(chapterStr) {
     return match ? parseFloat(match[1]) : 0;
 }
 
-function getRandomHeaders() {
-    // **التعديل 6: استخدام رؤوس متقدمة لتجاوز الحظر 403**
-    const userAgents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ];
-    
-    const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
-    
-    return {
-        'User-Agent': randomUserAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
-        'Cache-Control': 'max-age=0',
-        'Connection': 'keep-alive',
-        'Referer': 'https://azoramoon.com/', // مهم جداً
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1',
-        // رؤوس خاصة بـ Chrome
-        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
-    };
-}
-
 async function fetchWithRetry(url, maxRetries = SYSTEM_CONFIG.MAX_FETCH_RETRIES) {
     for (let i = 0; i < maxRetries; i++) {
         try {
@@ -277,7 +324,8 @@ async function processManga(mangaId, groupName) {
     });
     
     try {
-        const html = await fetchWithRetry(url);
+        // **التعديل 20: استخدام tryAllProxies بدلاً من fetchWithRetry**
+        const html = await tryAllProxies(url);
         const scrapedChapters = extractChapters(html);
         
         if (scrapedChapters.length === 0) {
@@ -298,7 +346,7 @@ async function processManga(mangaId, groupName) {
                 // حفظ الفصل وإرسال إشعار إلى البوت 3
                 await chapterGroupManager.saveChapter(mangaId, chapter);
                 newChaptersCount++;
-                // **التعديل 20: استخدام تأخير عشوائي بين حفظ الفصول**
+                // استخدام تأخير عشوائي بين حفظ الفصول
                 const randomDelay = SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS + Math.floor(Math.random() * 1000);
                 await new Promise(resolve => setTimeout(resolve, randomDelay));
             } else {
@@ -412,40 +460,6 @@ async function continuousMangaCheck() {
                             }
                         }
                     }
-                        const manga = groupData[mangaId];
-                        
-                        // معالجة المانجا التي لم يتم معالجتها بعد أو التي بها خطأ
-                        if (manga.status === 'pending_chapters' || 
-                            manga.status === 'error' || 
-                            !manga.status) {
-                            
-                            console.log(`\n🎯 معالجة [${groupName}]: ${manga.title || mangaId}`);
-                            console.log(`   📊 الحالة: ${manga.status || 'unknown'}`);
-                            
-                            try {
-                                const result = await processManga(mangaId, groupName);
-                                
-                                if (result.success) {
-                                    processedCount++;
-                                    newChaptersTotal += result.newChapters || 0;
-                                    
-                                    console.log(`   ✅ تمت المعالجة: ${result.newChapters || 0} فصل جديد`);
-                                } else {
-                                    console.log(`   ⚠️  فشل: ${result.message || result.error}`);
-                                }
-                                
-                            } catch (error) {
-                                console.error(`   ❌ خطأ في المعالجة: ${error.message}`);
-                            }
-                            
-                            await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
-                            
-                            if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) {
-                                console.log(`\n⏸️  وصلت للحد الأقصى (${SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE})`);
-                                break;
-                            }
-                        }
-                    }
                     
                     await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_GROUPS));
                     
@@ -470,16 +484,6 @@ async function continuousMangaCheck() {
         }
     }
 }
-/*
-async function continuousMangaCheck() {
-    // ... (تمت إزالة الكود)
-}
-*/
-/*
-async function continuousMangaCheck() {
-    // ... (تمت إزالة الكود)
-}
-*/
 
 // ==================== واجهات API ====================
 const app = express();
@@ -487,18 +491,14 @@ const app = express();
 // **التعديل 11: تعديل واجهة API لاستقبال الطلب من البوت 1**
 app.get('/process-manga/:mangaId', async (req, res) => {
     const { mangaId } = req.params;
-    const { group } = req.query;
     
     try {
-        if (!group) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'يرجى تحديد اسم المجموعة (?group=HomeManga_X)' 
-            });
-        }
+        // البحث عن المانجا في جميع المجموعات
+        const searchResult = await findMangaInGroups(mangaId);
+        const groupName = searchResult.group;
         
         // **التعديل 12: تشغيل العملية في الخلفية لتجنب انتهاء مهلة الطلب**
-        processManga(mangaId, group)
+        processManga(mangaId, groupName)
             .then(result => console.log(`[خلفية] معالجة المانجا ${mangaId} اكتملت:`, result))
             .catch(error => console.error(`[خلفية] خطأ في معالجة المانجا ${mangaId}:`, error.message));
         
@@ -506,7 +506,7 @@ app.get('/process-manga/:mangaId', async (req, res) => {
             success: true, 
             message: 'بدأت معالجة الفصول في الخلفية',
             mangaId: mangaId,
-            group: group
+            group: groupName
         });
         
     } catch (error) {
@@ -517,19 +517,11 @@ app.get('/process-manga/:mangaId', async (req, res) => {
     }
 });
 
-// **التعديل 13: إزالة واجهة API /force-create-imgchapter غير الضرورية**
-// app.get('/force-create-imgchapter', async (req, res) => { ... });
-
-// **التعديل 14: إزالة واجهة API /test-chapter/:mangaId غير الضرورية**
-// app.get('/test-chapter/:mangaId', async (req, res) => { ... });
-
 app.get('/stats', async (req, res) => {
     try {
         const chapterStats = await readFromFirebase('System/chapter_stats') || {};
         
-        // **التعديل 15: تبسيط حساب الإحصائيات (يمكن إعادة تفعيل الحساب المعقد إذا لزم الأمر)**
-        // تم إزالة الحساب المعقد الذي يقرأ جميع المجموعات لتجنب انتهاء المهلة
-        
+        // **التعديل 15: تبسيط حساب الإحصائيات**
         res.json({
             success: true,
             system: SYSTEM_CONFIG,
@@ -564,6 +556,8 @@ app.listen(PORT, () => {
     console.log(`📊 نظام الفصول:`);
     console.log(`   • المجموعات: ${SYSTEM_CONFIG.GROUP_PREFIX}_1 إلى N`);
     console.log(`   • الفصول/مجموعة: ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}`);
+    console.log(`   • رؤوس HTTP: ${USER_AGENTS.length} user agents`);
+    console.log(`   • بروكسيات: ${PROXIES.length} خيارات`);
     
     setTimeout(async () => {
         // **التعديل 16: إعادة تفعيل بدء الفحص المستمر كخيار احتياطي**
