@@ -167,14 +167,31 @@ function cleanChapterNumber(chapterStr) {
 }
 
 function getRandomHeaders() {
+    // **التعديل 6: استخدام رؤوس متقدمة لتجاوز الحظر 403**
     const userAgents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ];
-    // **التعديل 6: إضافة رأس Referer لتقليل الحظر**
-    return { 
-        'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
-        'Referer': 'https://azoramoon.com/' 
+    
+    const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+    
+    return {
+        'User-Agent': randomUserAgent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+        'Cache-Control': 'max-age=0',
+        'Connection': 'keep-alive',
+        'Referer': 'https://azoramoon.com/', // مهم جداً
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        // رؤوس خاصة بـ Chrome
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"'
     };
 }
 
@@ -188,7 +205,10 @@ async function fetchWithRetry(url, maxRetries = SYSTEM_CONFIG.MAX_FETCH_RETRIES)
             return response.data;
         } catch (error) {
             if (i === maxRetries - 1) throw error;
-            await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
+            // **التعديل 19: استخدام تأخير عشوائي لمحاكاة سلوك الإنسان**
+            const randomDelay = 2000 + Math.floor(Math.random() * 3000); // بين 2 و 5 ثواني
+            console.log(`   ⏳ فشل الطلب (${i + 1}/${maxRetries}). الانتظار ${randomDelay / 1000} ثانية...`);
+            await new Promise(resolve => setTimeout(resolve, randomDelay));
         }
     }
 }
@@ -278,7 +298,9 @@ async function processManga(mangaId, groupName) {
                 // حفظ الفصل وإرسال إشعار إلى البوت 3
                 await chapterGroupManager.saveChapter(mangaId, chapter);
                 newChaptersCount++;
-                await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS));
+                // **التعديل 20: استخدام تأخير عشوائي بين حفظ الفصول**
+                const randomDelay = SYSTEM_CONFIG.DELAY_BETWEEN_CHAPTERS + Math.floor(Math.random() * 1000);
+                await new Promise(resolve => setTimeout(resolve, randomDelay));
             } else {
                 console.log(`⏭️  الفصل ${chapter.title} موجود بالفعل. تم التخطي.`);
             }
@@ -329,11 +351,12 @@ async function continuousMangaCheck() {
             
             console.log('\n📊 بدء دورة فحص جديدة للمانجا...');
             
+            // **التعديل 17: تحسين منطق الفحص المستمر للبوت 2**
             // قراءة إحصائيات المانجا من البوت 1
             const mangaStats = await readFromFirebase('System/stats') || {};
             const maxGroup = mangaStats.currentGroup || 1;
             
-            console.log(`📁 عدد مجموعات المانجا: ${maxGroup}`);
+            console.log(`📁 عدد مجموعات المانجا المحتملة: ${maxGroup}`);
             
             for (let groupNum = 1; groupNum <= maxGroup; groupNum++) {
                 const groupName = `${SYSTEM_CONFIG.GROUP_PREFIX}_${groupNum}`;
@@ -344,11 +367,51 @@ async function continuousMangaCheck() {
                     const groupData = await readFromFirebase(groupName);
                     
                     if (!groupData || typeof groupData !== 'object') {
-                        console.log(`   ⏭️  المجموعة فارغة أو غير موجودة`);
+                        console.log(`   ⏭️  المجموعة فارغة أو غير موجودة (Group Data: ${JSON.stringify(groupData)})`);
                         continue;
                     }
                     
-                    for (const mangaId in groupData) {
+                    const mangaIds = Object.keys(groupData).filter(key => key !== 'created' && key !== 'type');
+                    console.log(`   📊 تم العثور على ${mangaIds.length} عنصر في المجموعة.`);
+                    
+                    for (const mangaId of mangaIds) {
+                        const manga = groupData[mangaId];
+                        
+                        // **التعديل 18: إضافة تسجيل مفصل لحالة المانجا**
+                        console.log(`   🔍 فحص المانجا ${mangaId} - الحالة الحالية: ${manga.status || 'غير محدد'}`);
+                        
+                        // معالجة المانجا التي لم يتم معالجتها بعد أو التي بها خطأ
+                        if (manga.status === 'pending_chapters' || 
+                            manga.status === 'error' || 
+                            !manga.status) {
+                            
+                            console.log(`\n🎯 معالجة [${groupName}]: ${manga.title || mangaId}`);
+                            console.log(`   📊 الحالة: ${manga.status || 'unknown'}`);
+                            
+                            try {
+                                const result = await processManga(mangaId, groupName);
+                                
+                                if (result.success) {
+                                    processedCount++;
+                                    newChaptersTotal += result.newChapters || 0;
+                                    
+                                    console.log(`   ✅ تمت المعالجة: ${result.newChapters || 0} فصل جديد`);
+                                } else {
+                                    console.log(`   ⚠️  فشل: ${result.message || result.error}`);
+                                }
+                                
+                            } catch (error) {
+                                console.error(`   ❌ خطأ في المعالجة: ${error.message}`);
+                            }
+                            
+                            await new Promise(resolve => setTimeout(resolve, SYSTEM_CONFIG.DELAY_BETWEEN_MANGA));
+                            
+                            if (processedCount >= SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE) {
+                                console.log(`\n⏸️  وصلت للحد الأقصى (${SYSTEM_CONFIG.MAX_MANGA_PER_CYCLE})`);
+                                break;
+                            }
+                        }
+                    }
                         const manga = groupData[mangaId];
                         
                         // معالجة المانجا التي لم يتم معالجتها بعد أو التي بها خطأ
@@ -503,8 +566,8 @@ app.listen(PORT, () => {
     console.log(`   • الفصول/مجموعة: ${SYSTEM_CONFIG.MAX_CHAPTERS_PER_GROUP}`);
     
     setTimeout(async () => {
-        await chapterGroupManager.initialize();
         // **التعديل 16: إعادة تفعيل بدء الفحص المستمر كخيار احتياطي**
+        await chapterGroupManager.initialize(); 
         continuousMangaCheck();
         console.log('✅ تم تفعيل الفحص المستمر كخيار احتياطي.');
     }, 5000);
